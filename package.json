@@ -1,0 +1,37 @@
+{
+  "name": "sitemap-scanner",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Crawl, screenshot, link-check and visually diff a WordPress site between review cycles.",
+  "type": "module",
+  "bin": {
+    "sitemap-scanner": "./dist/cli.js"
+  },
+  "scripts": {
+    "scan": "tsx src/cli.ts scan",
+    "report": "tsx src/cli.ts report",
+    "serve": "tsx src/cli.ts serve",
+    "runs": "tsx src/cli.ts runs",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "postinstall": "playwright install chromium"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "fast-xml-parser": "^4.5.0",
+    "p-limit": "^6.1.0",
+    "pixelmatch": "^6.0.0",
+    "playwright": "^1.48.0",
+    "pngjs": "^7.0.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.0",
+    "@types/pngjs": "^6.0.5",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

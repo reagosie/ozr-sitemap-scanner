@@ -1,0 +1,16 @@
+{
+  "breakpoints": [
+    { "name": "mobile", "width": 390 },
+    { "name": "tablet", "width": 768 },
+    { "name": "desktop", "width": 1440 }
+  ],
+  "concurrency": 3,
+  "diffThreshold": 0.001,
+  "retainRuns": 5,
+  "sites": {
+    "campozark.com": {
+      "hide": [".instagram-gallery-feed"],
+      "blockUrls": ["fbcdn.net", "cdninstagram.com", "instagram.com"]
+    }
+  }
+}

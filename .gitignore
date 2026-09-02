@@ -1,0 +1,9 @@
+node_modules/
+dist/
+runs/
+*.log
+.DS_Store
+
+# Scan outputs (site-specific findings, not tool code)
+handoff-data.json
+*-site-audit-*.html
