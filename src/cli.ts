@@ -19,6 +19,15 @@ import type { LinkCheckReport } from './crawl/links.js';
 import type { CopyReport } from './copy/types.js';
 import type { Inventory } from './types.js';
 
+/**
+ * The run finished, but the site's own sitemap is incomplete.
+ *
+ * Distinct from 1 so automation can tell "the scanner broke" from "the scanner
+ * worked and found something wrong with the site" -- the second recurs every run
+ * until someone fixes the site, and must not look like a tool failure.
+ */
+const EXIT_SITE_DEFECT = 2;
+
 const program = new Command();
 program.name('sitemap-scanner').description('Crawl, screenshot, link-check, proofread and visually diff a WordPress site.');
 
@@ -240,8 +249,17 @@ program
 
     console.log(`  run: ${runId}`);
     if (inv.errors.length) {
-      console.log('\n  Inventory is incomplete - see errors above.\n');
-      process.exitCode = 1;
+      console.log('\n  Inventory is incomplete - see errors above.');
+      console.log('  (exit 2: the run still completes; this flags a defect in the SITE, not the scan)\n');
+      // Exit 2, not 1.
+      //
+      // campozark declares ozrsession-sitemap.xml in its sitemap index and
+      // serves a 404 for it. That is a real defect worth reporting, but it
+      // recurs on every single run, so exiting 1 meant a 90-minute successful
+      // scan reported as failed forever -- and an exit code that is always
+      // failing is one nobody reads. 1 stays reserved for the scan itself
+      // failing, which the top-level catch handles.
+      process.exitCode = EXIT_SITE_DEFECT;
     }
 
     if (opts.discoverOnly) return;

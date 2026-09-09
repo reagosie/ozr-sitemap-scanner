@@ -31,6 +31,20 @@ npm run migrate -- https://campozark.com                # push local runs to S3
 The site is an argument, not configuration. WordPress is detected and asserted
 at run start.
 
+### Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Clean run |
+| 2 | The run completed, but the site's sitemap is incomplete |
+| 1 | The scan itself failed |
+
+2 is separate from 1 on purpose. campozark declares `ozrsession-sitemap.xml` in
+its sitemap index and serves a 404 for it — a real defect, but one that recurs on
+every run until someone fixes the site. Exiting 1 for it meant a ninety-minute
+successful scan reported as failed, every time, and an exit code that always
+fails is one nobody reads.
+
 ## Storage
 
 Runs are stored centrally in S3 so the **baseline is shared**. That is the whole
