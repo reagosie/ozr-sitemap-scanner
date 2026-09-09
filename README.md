@@ -76,6 +76,21 @@ Teammates need credentials in AWS account `117225656269`. `docs/iam-policy.json`
 grants exactly what the tool uses and nothing else; attach it to a group and add
 users to it.
 
+### Moving existing runs in
+
+`npm run migrate -- <site>` uploads local runs, re-keying every screenshot by
+content hash on the way, sets the baseline pointer, and builds reports for what
+it moved. By default it migrates only the run the baseline points at — pass
+`--all` for every local run.
+
+Migrate rather than starting fresh when a baseline is worth keeping: without it,
+the next scan reports every page as new and gives you no change signal, which
+costs a whole review cycle.
+
+Note that a run captured before proofreading existed carries no page text, so
+`proofread` will refuse it and say so. Screenshots cannot be un-read into words
+— only a fresh scan collects copy.
+
 ### Reports
 
 Every run produces three things:
