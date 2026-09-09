@@ -271,6 +271,7 @@ program
       changedOnly: Boolean(opts.changedOnly) && Boolean(baselineInv),
       baseline: baselineInv,
       extractText: wantProofread,
+      textIgnoreSelectors: [...config.proofread.ignoreSelectors, ...(sc.ignoreSelectors ?? [])],
       onProgress: (m) => console.log(m),
     });
     let captures = run.captures;

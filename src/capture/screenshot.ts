@@ -66,6 +66,14 @@ export interface CaptureOptions {
    * would triple the work and then throw two thirds of it away.
    */
   extractText?: boolean;
+  /**
+   * Selectors whose text is excluded from proofreading, comma-separated.
+   *
+   * Distinct from `hide` and `mask`: those change the SCREENSHOT. This changes
+   * only what the copy checks read, so a cookie banner is still reviewed
+   * visually while its boilerplate stays out of the findings list.
+   */
+  textIgnoreSelector?: string;
 }
 
 export async function capturePage(
@@ -79,6 +87,7 @@ export async function capturePage(
     navTimeoutMs = 45_000,
     idleTimeoutMs = 8_000,
     extractText = false,
+    textIgnoreSelector = '',
   } = opts;
   const page = await ctx.newPage();
 
@@ -260,7 +269,7 @@ export async function capturePage(
     // other, and the reviewer would see a duplicate finding for a single typo.
     // Same anonymous-callback rule as everywhere else in this file.
     const textBlocks: TextBlock[] = extractText
-      ? await page.evaluate(() => {
+      ? await page.evaluate((ignoreSelector) => {
           const SELECTOR =
             'p,li,h1,h2,h3,h4,h5,h6,td,th,blockquote,figcaption,dt,dd,summary,label,button,a';
           const seen = new Set<string>();
@@ -268,25 +277,41 @@ export async function capturePage(
 
           for (const el of Array.from(document.querySelectorAll(SELECTOR))) {
             if (el.parentElement && el.parentElement.closest(SELECTOR)) continue;
+            // Cookie banners and consent modals are third-party boilerplate that
+            // nobody will ever edit. Left in, they are the loudest copy findings
+            // on the site -- present on every page, and not the site's words.
+            if (ignoreSelector && el.closest(ignoreSelector)) continue;
 
             // innerText, not textContent: it reflects what is actually rendered,
             // so display:none blocks and the elements hidden by config return ''.
             const raw = (el as HTMLElement).innerText;
             if (!raw) continue;
 
-            const text = raw.replace(/\s+/g, ' ').trim();
-            // Below this length a "block" is a nav label or a bare number, which
-            // produces noise in every checker and signal in none.
-            if (text.length < 12) continue;
-            if (seen.has(text)) continue;
+            // Split on the LINE BREAKS innerText inserts, and keep them as block
+            // boundaries.
+            //
+            // Collapsing them into spaces welds neighbouring UI text together and
+            // invents defects that are not on the page: a nested nav rendered
+            // "Ready Set Camp\nCamp Prep Guide" became "Ready Set Camp Camp Prep
+            // Guide", reported as a repeated word on 516 pages, and a heading
+            // followed by a paragraph became "ExperienceOur". Only spaces within
+            // a line are safe to collapse.
+            for (const line of raw.split('\n')) {
+              const text = line.replace(/[^\S\n]+/g, ' ').trim();
+              // Below this length a "block" is a nav label or a bare number, which
+              // produces noise in every checker and signal in none.
+              if (text.length < 12) continue;
+              if (seen.has(text)) continue;
 
-            seen.add(text);
-            out.push({ tag: el.tagName.toLowerCase(), text });
-            if (out.length >= 600) break;
+              seen.add(text);
+              out.push({ tag: el.tagName.toLowerCase(), text });
+            }
+
+            if (out.length >= 800) break;
           }
 
           return out;
-        })
+        }, textIgnoreSelector)
       : [];
 
     // No `path`: the buffer goes to content-addressed storage under the hash of

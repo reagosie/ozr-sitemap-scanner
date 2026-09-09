@@ -60,6 +60,8 @@ export interface CaptureOptions {
   baseline?: Inventory | null;
   /** Collect page copy for the proofreader. */
   extractText?: boolean;
+  /** Regions excluded from the collected copy, but still screenshotted. */
+  textIgnoreSelectors?: string[];
   onProgress?: (msg: string) => void;
 }
 
@@ -94,6 +96,7 @@ export async function captureAll(
     changedOnly = false,
     baseline = null,
     extractText = false,
+    textIgnoreSelectors = [],
     onProgress = () => {},
   } = opts;
 
@@ -157,6 +160,7 @@ export async function captureAll(
               mask,
               hide,
               extractText: wantText,
+              textIgnoreSelector: textIgnoreSelectors.join(','),
             });
 
             const file = `${cap.slug}__${bp.name}.png`;

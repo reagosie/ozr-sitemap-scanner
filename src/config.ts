@@ -23,6 +23,8 @@ const SiteConfigSchema = z.object({
   blockUrls: z.array(z.string()).optional(),
   /** Site-specific proper nouns the spellchecker must never flag. */
   glossary: z.array(z.string()).optional(),
+  /** Extra regions excluded from copy checks, on top of the global defaults. */
+  ignoreSelectors: z.array(z.string()).optional(),
   /**
    * Canonical spellings the consistency check treats as correct, so a variant
    * is reported against the intended form rather than the most frequent one.
@@ -68,6 +70,30 @@ const ProofreadSchema = z
     /** Use LanguageTool when Docker is available. */
     languageTool: z.boolean().default(true),
     languageToolPort: z.number().int().positive().default(8010),
+    /**
+     * Regions excluded from the copy checks (but still screenshotted).
+     *
+     * Consent managers ship the same paragraph to every page and nobody on the
+     * site's team can edit it. On campozark that boilerplate produced four of
+     * the loudest findings on the site -- "analyse", "This cookies",
+     * "campozark", "Youtube" -- each reported against all 524 pages. These
+     * defaults cover the widely used WordPress plugins; add site-specific ones
+     * per host.
+     */
+    ignoreSelectors: z
+      .array(z.string())
+      .default([
+        '#cookie-law-info-bar',
+        '#cookie-law-info-again',
+        '.cli-modal',
+        '#cliSettingsPopup',
+        '.cky-consent-container',
+        '.cky-modal',
+        '#cookiescript_injected',
+        '#onetrust-consent-sdk',
+        '#CybotCookiebotDialog',
+        '.cc-window',
+      ]),
   })
   .default({});
 

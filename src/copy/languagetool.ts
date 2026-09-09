@@ -20,6 +20,29 @@ const DISABLED_RULES = 'MORFOLOGIK_RULE_EN_US';
 /** Rule categories that duplicate checks retext already does better. */
 const DUPLICATE_CATEGORIES = new Set(['TYPOGRAPHY', 'TYPOS']);
 
+/**
+ * Confidence from LanguageTool's OWN classification of the rule.
+ *
+ * The previous rule -- "one replacement offered means high confidence" -- ranked
+ * a British/American spelling preference level with a genuine doubled word. On
+ * campozark that promoted `analyse` vs `analyze` to the top of the report,
+ * reported against all 524 pages, above every real defect. What a rule IS
+ * matters; how many fixes it can suggest does not.
+ */
+const CONFIDENCE_BY_ISSUE_TYPE: Record<string, Confidence> = {
+  grammar: 'high',
+  duplication: 'high',
+  misspelling: 'high',
+  typographical: 'medium',
+  inconsistency: 'medium',
+  'non-conformance': 'medium',
+  style: 'low',
+  register: 'low',
+  'locale-violation': 'low',
+  whitespace: 'low',
+  uncategorized: 'low',
+};
+
 export interface LanguageToolOptions {
   port: number;
   /** Start the container if nothing is listening. */
@@ -210,11 +233,10 @@ export async function checkGrammar(
         continue;
       }
 
-      // LanguageTool's own confidence signal: a rule offering one concrete
-      // replacement is far more certain than one offering a dozen or none.
       const replacements = (m.replacements ?? []).map((r) => r.value).slice(0, 3);
-      const confidence: Confidence =
-        replacements.length === 1 ? 'high' : replacements.length ? 'medium' : 'low';
+      // Unknown issue types stay at medium: new rules should not arrive at the
+      // top of the report unannounced, nor be buried where nobody sees them.
+      const confidence: Confidence = CONFIDENCE_BY_ISSUE_TYPE[m.rule?.issueType ?? ''] ?? 'medium';
 
       byKey.set(key, {
         id: findingId('grammar', match, `${ruleId}|${m.message}`),
