@@ -348,11 +348,33 @@ program
       const flagged = diffs.filter((d) => d.flagged);
       const RECHECK_CAP = 150;
 
-      if (flagged.length && flagged.length <= RECHECK_CAP) {
-        console.log('');
-        console.log(`  re-checking ${flagged.length} flagged page(s) serially to rule out capture races`);
+      // Re-check the LEAST-changed pages first, and cap how many rather than
+      // whether.
+      //
+      // The cap used to be all-or-nothing, which got it exactly backwards: on a
+      // run where 227 of 525 pages flagged, the confirmation pass declined to
+      // run at all -- precisely when knowing the noise rate mattered most, and
+      // leaving no way to tell real change from a lazy-image race.
+      //
+      // Ambiguity is not uniform across flagged pages. One that moved 40% of its
+      // pixels is plainly different and confirming it teaches nothing; one
+      // sitting just over the threshold is where a capture race hides. Sorting
+      // by change ratio ascending spends a bounded budget on the only pages
+      // whose verdict is actually in doubt.
+      const worstRatio = (d: PageDiff): number =>
+        Math.max(0, ...Object.values(d.breakpoints).map((b) => (b.status === 'changed' ? b.ratio : 0)));
+      const toRecheck = [...flagged].sort((a, b) => worstRatio(a) - worstRatio(b)).slice(0, RECHECK_CAP);
 
-        const locs = new Set(flagged.map((d) => d.loc));
+      if (toRecheck.length) {
+        console.log('');
+        console.log(
+          `  re-checking ${toRecheck.length} flagged page(s) serially to rule out capture races` +
+            (toRecheck.length < flagged.length
+              ? ` (the least-changed of ${flagged.length}; the rest changed too much to be noise)`
+              : ''),
+        );
+
+        const locs = new Set(toRecheck.map((d) => d.loc));
         const subset = { ...inv, entries: inv.entries.filter((e) => locs.has(e.loc)) };
         const { diffRuns: rerunDiff } = await import('./diff/run.js');
 
@@ -397,10 +419,9 @@ program
         const still = diffs.filter((d) => d.flagged).length;
         console.log(
           `  after re-check: ${still} still flagged ` +
-            `(${flagged.length - still} were capture noise, not real change)`,
+            `(${flagged.length - still} of the ${toRecheck.length} re-shot were capture noise, ` +
+            `not real change)`,
         );
-      } else if (flagged.length > RECHECK_CAP) {
-        console.log(`  ${flagged.length} flagged pages exceeds the re-check cap; skipping confirmation pass`);
       }
     }
 
