@@ -12,6 +12,16 @@ export interface MigrateOptions {
   onProgress?: (msg: string) => void;
 }
 
+export interface MigrateResult {
+  /** Runs now present in the central store. */
+  migrated: string[];
+  /** The run the baseline pointer was set to. */
+  baselineId: string;
+  uploaded: number;
+  reused: number;
+  bytes: number;
+}
+
 /**
  * The old on-disk shape, before content addressing.
  *
@@ -64,7 +74,7 @@ export async function migrateLocalRuns(
   backends: Backends,
   origin: string,
   opts: MigrateOptions,
-): Promise<void> {
+): Promise<MigrateResult> {
   const { onProgress = () => {} } = opts;
   const host = hostDir(origin);
   const localHostDir = path.resolve(config.storage.localRoot, host);
@@ -198,7 +208,8 @@ export async function migrateLocalRuns(
       ? `  baseline set to ${baselineId}`
       : `  WARNING: baseline not moved - it already points at ${result.conflictedWith ?? 'another run'}`,
   );
-  onProgress('');
+
+  return { migrated: toMigrate, baselineId, uploaded, reused, bytes };
 }
 
 async function readJsonFile<T>(file: string): Promise<T | null> {

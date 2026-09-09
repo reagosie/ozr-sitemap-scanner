@@ -684,10 +684,42 @@ program
       );
     }
     const { migrateLocalRuns } = await import('./store/migrate.js');
-    await migrateLocalRuns(config, backends, origin, {
+    const result = await migrateLocalRuns(config, backends, origin, {
       all: Boolean(opts.all),
       onProgress: (m) => console.log(m),
     });
+
+    // Build reports for what was just moved.
+    //
+    // A migrated run is uploaded precisely BECAUSE it has value -- its link
+    // results and inventory are the record of the last review. Leaving it
+    // viewable only to someone who knows to run a second command makes the
+    // migration look like it half-worked.
+    for (const runId of result.migrated) {
+      const keys = runKeys(origin, runId);
+      const inventory = await backends.data.getJson<Inventory>(keys.inventory);
+      if (!inventory) continue;
+
+      const manifest = await backends.data.getJson<{ baselineId?: string | null }>(keys.manifest);
+      console.log(`\n  building reports for ${runId}`);
+      await writeReports(
+        {
+          inventory,
+          captures: (await backends.data.getJson<PageCapture[]>(keys.captures)) ?? [],
+          diffs: await backends.data.getJson<PageDiff[]>(keys.diffs),
+          links: await backends.data.getJson<LinkCheckReport>(keys.links),
+          copy: await backends.data.getJson<CopyReport>(keys.copy),
+          runId,
+          baselineId: manifest?.baselineId ?? null,
+          breakpoints: config.breakpoints,
+          threshold: config.diffThreshold,
+        },
+        backends,
+        origin,
+        keys.report,
+      );
+    }
+    console.log('');
   });
 
 program
