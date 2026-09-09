@@ -12,16 +12,169 @@ off; this makes that review fast and complete.
 ```bash
 npm install
 
-npx tsx src/cli.ts scan https://campozark.com --discover-only   # inventory only
-npx tsx src/cli.ts scan https://campozark.com --limit 20        # fast loop
-npx tsx src/cli.ts scan https://campozark.com                   # full run
-npx tsx src/cli.ts serve https://campozark.com                  # view latest report
-npx tsx src/cli.ts runs https://campozark.com                   # list runs
-npx tsx src/cli.ts diff https://campozark.com --current <id> --baseline <id>
+npm run where                                   # which store am I pointed at?
+npm run scan -- https://campozark.com --discover-only   # inventory only
+npm run scan -- https://campozark.com --limit 20        # fast loop
+npm run scan -- https://campozark.com                   # full run
+npm run serve -- https://campozark.com                  # view latest report
+npm run runs -- https://campozark.com                   # list runs
+
+# Re-run one stage against a stored run, without re-capturing
+npm run links -- https://campozark.com
+npm run proofread -- https://campozark.com
+npm run report -- https://campozark.com
+
+npm run dismiss -- https://campozark.com <findingId>    # retire a false positive
+npm run migrate -- https://campozark.com                # push local runs to S3
 ```
 
 The site is an argument, not configuration. WordPress is detected and asserted
 at run start.
+
+## Storage
+
+Runs are stored centrally in S3 so the **baseline is shared**. That is the whole
+point: the diff is what turns a 524-page review into a 30-page one, and a
+baseline sitting on one laptop means everyone else gets 524 "new" pages and no
+change signal.
+
+```
+s3://tfc-sitemap-scanner/
+  data/<host>/
+    blobs/<sha256>.png          screenshots, addressed by content
+    <runId>/                    inventory, captures, diffs, links, copy, report
+    baseline.json               what the next run compares against
+    copy-accepted.json          dismissed proofreading findings
+  reports/<host>/<runId>/       emailable HTML + PDF
+```
+
+**Screenshots are addressed by the SHA-256 of their bytes, not by run.** An
+unchanged page hashes the same every time, so it uploads once and is shared by
+every run that references it. Two consequences, both large:
+
+- A repeat scan uploads almost nothing. Measured on 45 campozark pages: 36 of 45
+  blobs already existed, so only 9 were sent.
+- **The diff for an unchanged page transfers zero bytes.** Equal hashes prove the
+  images are identical, so no download and no pixel comparison happens. Without
+  this, every scan would pull the entire 4.4 GB baseline back down — by far the
+  biggest cost in the whole pipeline.
+
+Pruning is therefore garbage collection, not deletion: removing a run does not
+free its images, because a surviving run may still reference them. Blobs are
+collected only when nothing points at them **and** they are over 7 days old, so a
+concurrent scan cannot have its freshly uploaded screenshots deleted before its
+`captures.json` lands.
+
+### Running without AWS
+
+`storage.backend` defaults to `auto`: S3 when a bucket resolves, the local
+filesystem otherwise. Everything works either way — you just lose the shared
+baseline. Set `SITEMAP_SCANNER_BUCKET` to override the configured bucket without
+editing a committed file.
+
+Teammates need credentials in AWS account `117225656269`. `docs/iam-policy.json`
+grants exactly what the tool uses and nothing else; attach it to a group and add
+users to it.
+
+### Reports
+
+Every run produces three things:
+
+| File | Where | For |
+| --- | --- | --- |
+| `report.html` | `data/` | The interactive worklist — filter, sort, "flagged only". Needs `npm run serve`. |
+| `audit-<host>-<date>.html` | `reports/` | Self-contained. Email it. Opens with no AWS account and no tool. |
+| `audit-<host>-<date>.pdf` | `reports/` | Findings only, for people who just want to read it. |
+
+The emailable HTML embeds before/after/diff thumbnails for the pages that
+actually changed, and links the rest via presigned URLs. It cannot embed
+everything: desktop screenshots average 3.5 MB, so even shrinking 524 pages
+twelvefold lands at 63 MB. **Presigned links expire after 7 days** — AWS's hard
+ceiling for IAM-user signatures. The embedded thumbnails never expire; re-run
+`npm run report` to mint fresh links.
+
+`npm run serve` streams screenshots from S3 through localhost using your own
+credentials, which is how the bucket stays private — nothing is ever made public
+and no long-lived URLs are minted.
+
+## Proofreading
+
+Every scan also reads the words. It uses **local libraries only — no API, no
+cost, no key** — so the tool still runs anywhere with just Node.
+
+| Check | Catches |
+| --- | --- |
+| retext | Doubled words, "a apple", quote and spacing slips |
+| nspell + site dictionary | Misspellings |
+| LanguageTool (optional) | ~5,000 grammar rules: agreement, their/there, tense |
+| Frequency analysis | Brand and name spellings that disagree across pages |
+| Date scan | Past years in copy that reads as upcoming |
+
+Text is collected during the capture pass — no extra page loads — at the widest
+breakpoint only, since responsive CSS moves words but does not rewrite them.
+
+**Findings are deduplicated by text, not by page.** A typo in the global footer
+is one finding listed against 157 pages, never 157 findings.
+
+### Why it isn't a spellchecker
+
+A stock dictionary flags "Ozark", "Mena", "Gaga" and every staff surname. A
+report like that gets ignored once and never opened again, which is the same
+failure that makes 403-as-broken unacceptable in the link checker. Four rules do
+the work:
+
+- **The corpus is the dictionary.** A word on ≥5 distinct pages was written
+  deliberately, whatever Hunspell thinks. The threshold scales down on small
+  sites, where "5 pages" would mean "most of the site".
+- **Capitalized mid-sentence means it is a name.** On staff bios this alone
+  removed twelve of seventeen "high confidence" findings — Hoercher, Baggett,
+  Weatherford, each helpfully offered a real word one edit away.
+- **Capitalized *everywhere* means it is a name.** Catches the ones that only
+  ever appear at the start of a list item, where the rule above cannot see them.
+  Prose would have written "ouachita" in lower case somewhere; a name never does.
+- **Emails and URLs are not prose.** Without masking them, a staff directory
+  turns the spelling section into a list of email local parts.
+
+Measured on 45 campozark pages (53,582 words): these took the findings from 49 to
+6, of which 4 were real — including two different stale copyright years across 45
+pages and a genuine `"is is"`.
+
+### Naming consistency
+
+Counting capitalized phrases across every page finds spellings that disagree —
+"Camp Ozark" ×400 against "camp ozark" ×2. This is the one check a human
+structurally cannot do, because reading one page at a time both look fine.
+
+Two exclusions matter. A phrase only counts as a name if some word in it is
+*not* in the dictionary, or "Learn More" vs "LEARN MORE" swamps everything. And
+ALL CAPS is ignored entirely: `innerText` reflects CSS `text-transform`, so an
+uppercased button arrives looking like someone typed it that way, and chasing it
+sends a reviewer hunting for a text change that lives in a stylesheet.
+
+### Stale dates
+
+Reports **candidates, not defects**. Whether "Summer 2024" is stale or an
+accurate historical reference depends on what the page is for, which no rule
+knows. So it surfaces past-year mentions that read as forward-looking, skips
+anything near a biography or history verb ("graduated in 2010" is correct
+forever), and hands over a short ranked list. Copyright years are the exception —
+those are unambiguous.
+
+### LanguageTool
+
+Optional and auto-detected. If Docker is present the container starts on demand;
+if not, the check is skipped and the report says so. Its own spellchecker is
+disabled — it does not know this site, and `spelling.ts` does.
+
+It earns its keep on things rules cannot reach. On the first foundation run it
+found *"Sunday, December 7th"* — and noted that December 7th, 2026 is a Monday.
+
+### False positives
+
+`npm run dismiss -- <site> <findingId>` retires one for good. Ids are stable
+across runs, and the list lives beside the baseline so it is shared by everyone.
+Without this the same wrong answers come back every cycle and the section stops
+being read.
 
 ## Decisions worth knowing
 
@@ -101,12 +254,27 @@ capturing anything, which is how the capture-determinism regression test works.
 
 `scanner.config.json`, per host:
 
+Top level:
+
+| key | meaning |
+| --- | --- |
+| `storage.backend` | `auto` (default), `local`, or `s3` |
+| `storage.bucket` | overridden by `SITEMAP_SCANNER_BUCKET` |
+| `proofread.siteWordMinPages` | pages a word must appear on to count as site vocabulary |
+| `proofread.glossary` | words the spellchecker must never flag |
+| `proofread.languageTool` | use LanguageTool when Docker is available |
+| `retainRuns` | runs kept per host before pruning and blob GC |
+
+Per host, under `sites`:
+
 | key | meaning |
 | --- | --- |
 | `tiers` | override A/B/C assignment by post type |
 | `hide` | selectors removed from layout before measurement (third-party embeds) |
 | `mask` | selectors painted over after layout (first-party churn) |
 | `blockUrls` | URL fragments blocked during capture |
+| `glossary` | site-specific proper nouns |
+| `canonicalNames` | the spelling a name *should* have, so variants are reported against it rather than against whichever form happens to be commonest |
 
 `hide` and `mask` are not interchangeable. Masking covers changing pixels but
 not a changing height; an embed that loads a variable number of items shifts
@@ -114,15 +282,20 @@ everything below it, and only removal makes the capture deterministic.
 
 ## Run layout
 
+Identical keys on both backends — S3 under `data/`, and on disk under `runs/`:
+
 ```
-runs/<host>/<runId>/
+<host>/<runId>/
   inventory.json   canonical URL list, tiers, provenance
-  captures.json    per-URL screenshot results and extracted links
+  captures.json    per-URL screenshot hashes and extracted links
   links.json       link check results
   diffs.json       per-URL/per-breakpoint comparison against the baseline
+  copy.json        proofreading findings
   manifest.json    config snapshot, counts, errors
-  shots/  diffs/  report/
-runs/<host>/baseline.json   points at the run the next one compares against
+  report.html      the interactive report
+<host>/blobs/<sha256>.png    every screenshot and diff overlay, shared across runs
+<host>/baseline.json         points at the run the next one compares against
+<host>/copy-accepted.json    dismissed copy findings
 ```
 
 `runs/` is git-ignored.

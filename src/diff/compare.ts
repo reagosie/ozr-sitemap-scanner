@@ -1,4 +1,3 @@
-import { readFile, writeFile } from 'node:fs/promises';
 import { PNG } from 'pngjs';
 import pixelmatch from 'pixelmatch';
 
@@ -13,7 +12,16 @@ export interface DiffResult {
   baselineHeight: number;
   currentHeight: number;
   heightDelta: number;
-  diffFile?: string;
+  /** Blob hash of the overlay, written only for flagged pairs. */
+  diffSha256?: string;
+  /**
+   * Blob hash of the image this was compared against.
+   *
+   * Carried here so the report can render a before/after pair without also
+   * loading the baseline run's captures.json -- the diff already knew both
+   * addresses, and nothing else in the pipeline does.
+   */
+  baselineSha256?: string;
   error?: string;
 }
 
@@ -33,6 +41,34 @@ function padTo(img: PNG, width: number, height: number): PNG {
   return out;
 }
 
+export interface CompareOutcome {
+  result: DiffResult;
+  /** Overlay bytes, present only when the pair was flagged. */
+  diffBuffer?: Buffer;
+}
+
+/**
+ * Result for a pair proven identical by their content hashes.
+ *
+ * Byte-equal images cannot differ, so this is exact rather than an
+ * approximation -- and it is what makes a remote baseline affordable: no
+ * download, no decode, no pixelmatch for the ~95% of pages that did not change.
+ */
+export function unchangedByHash(height: number, sha256: string): CompareOutcome {
+  return {
+    result: {
+      status: 'unchanged',
+      changedPixels: 0,
+      totalPixels: 0,
+      ratio: 0,
+      baselineHeight: height,
+      currentHeight: height,
+      heightDelta: 0,
+      baselineSha256: sha256,
+    },
+  };
+}
+
 /**
  * Compare one screenshot against its baseline.
  *
@@ -41,44 +77,80 @@ function padTo(img: PNG, width: number, height: number): PNG {
  * canvas, and the height change is reported as a signal in its own right --
  * "page grew 3200 -> 3480" is often more informative than the pixel count,
  * because a height change means content was added or removed, not restyled.
+ *
+ * Takes buffers rather than paths: the images may live in S3, and the caller is
+ * the only layer that knows how to fetch them.
  */
-export async function compareShots(
-  baselinePath: string,
-  currentPath: string,
-  diffPath: string,
+export function compareShots(
+  baseline: Buffer | null,
+  current: Buffer | null,
   flagThreshold: number,
-): Promise<DiffResult> {
+): CompareOutcome {
   let basePng: PNG;
   let currPng: PNG;
 
-  try {
-    currPng = PNG.sync.read(await readFile(currentPath));
-  } catch (err) {
+  if (!current) {
     return {
-      status: 'error',
-      changedPixels: 0,
-      totalPixels: 0,
-      ratio: 0,
-      baselineHeight: 0,
-      currentHeight: 0,
-      heightDelta: 0,
-      error: `current screenshot unreadable: ${err instanceof Error ? err.message : String(err)}`,
+      result: {
+        status: 'error',
+        changedPixels: 0,
+        totalPixels: 0,
+        ratio: 0,
+        baselineHeight: 0,
+        currentHeight: 0,
+        heightDelta: 0,
+        error: 'current screenshot missing',
+      },
     };
   }
 
   try {
-    basePng = PNG.sync.read(await readFile(baselinePath));
-  } catch {
+    currPng = PNG.sync.read(current);
+  } catch (err) {
+    return {
+      result: {
+        status: 'error',
+        changedPixels: 0,
+        totalPixels: 0,
+        ratio: 0,
+        baselineHeight: 0,
+        currentHeight: 0,
+        heightDelta: 0,
+        error: `current screenshot unreadable: ${err instanceof Error ? err.message : String(err)}`,
+      },
+    };
+  }
+
+  if (!baseline) {
     // No baseline for this URL/breakpoint: it is NEW, not changed. Reporting it
     // as changed would imply a regression where there is simply no history.
     return {
-      status: 'new',
-      changedPixels: 0,
-      totalPixels: currPng.width * currPng.height,
-      ratio: 0,
-      baselineHeight: 0,
-      currentHeight: currPng.height,
-      heightDelta: currPng.height,
+      result: {
+        status: 'new',
+        changedPixels: 0,
+        totalPixels: currPng.width * currPng.height,
+        ratio: 0,
+        baselineHeight: 0,
+        currentHeight: currPng.height,
+        heightDelta: currPng.height,
+      },
+    };
+  }
+
+  try {
+    basePng = PNG.sync.read(baseline);
+  } catch (err) {
+    return {
+      result: {
+        status: 'error',
+        changedPixels: 0,
+        totalPixels: 0,
+        ratio: 0,
+        baselineHeight: 0,
+        currentHeight: currPng.height,
+        heightDelta: 0,
+        error: `baseline screenshot unreadable: ${err instanceof Error ? err.message : String(err)}`,
+      },
     };
   }
 
@@ -97,23 +169,18 @@ export async function compareShots(
   const ratio = totalPixels === 0 ? 0 : changedPixels / totalPixels;
   const changed = ratio > flagThreshold;
 
-  // Only write a diff overlay for flagged pairs -- at ~1,500 captures per run,
-  // writing an overlay for every unchanged pair would triple the run's disk use
-  // for images nobody opens.
-  let diffFile: string | undefined;
-  if (changed) {
-    await writeFile(diffPath, PNG.sync.write(diff));
-    diffFile = diffPath;
-  }
-
   return {
-    status: changed ? 'changed' : 'unchanged',
-    changedPixels,
-    totalPixels,
-    ratio,
-    baselineHeight: basePng.height,
-    currentHeight: currPng.height,
-    heightDelta: currPng.height - basePng.height,
-    ...(diffFile ? { diffFile } : {}),
+    result: {
+      status: changed ? 'changed' : 'unchanged',
+      changedPixels,
+      totalPixels,
+      ratio,
+      baselineHeight: basePng.height,
+      currentHeight: currPng.height,
+      heightDelta: currPng.height - basePng.height,
+    },
+    // Only flagged pairs get an overlay -- at ~1,500 captures per run, storing an
+    // overlay for every unchanged pair would inflate the run for images nobody opens.
+    ...(changed ? { diffBuffer: PNG.sync.write(diff) } : {}),
   };
 }

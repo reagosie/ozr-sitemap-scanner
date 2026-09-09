@@ -1,4 +1,37 @@
 {
+  "storage": {
+    "backend": "auto",
+    "bucket": "tfc-sitemap-scanner",
+    "region": "us-east-2",
+    "dataPrefix": "data",
+    "reportsPrefix": "reports",
+    "localRoot": "runs"
+  },
+  "proofread": {
+    "enabled": true,
+    "siteWordMinPages": 5,
+    "languageTool": true,
+    "languageToolPort": 8010,
+    "glossary": [
+      "zipline",
+      "ziplines",
+      "waterslide",
+      "waterslides",
+      "waterpark",
+      "waterparks",
+      "lifeguarding",
+      "blobbing",
+      "gaga",
+      "campership",
+      "camperships",
+      "wifi",
+      "onboarding",
+      "summa",
+      "magna",
+      "laude",
+      "Juris"
+    ]
+  },
   "breakpoints": [
     { "name": "mobile", "width": 390 },
     { "name": "tablet", "width": 768 },
@@ -10,7 +43,25 @@
   "sites": {
     "campozark.com": {
       "hide": [".instagram-gallery-feed"],
-      "blockUrls": ["fbcdn.net", "cdninstagram.com", "instagram.com"]
+      "blockUrls": ["fbcdn.net", "cdninstagram.com", "instagram.com"],
+      "canonicalNames": ["Camp Ozark", "Ozark"]
+    },
+    "campozarkfoundation.org": {
+      "hide": [".instagram-gallery-feed"],
+      "canonicalNames": ["Camp Ozark", "Ozark for All"]
+    },
+    "campotx.com": {
+      "hide": [".instagram-gallery-feed"],
+      "canonicalNames": ["Camp Ozark Texas"]
+    },
+    "campwareagle.org": {
+      "canonicalNames": ["Camp War Eagle"]
+    },
+    "ozarkleadershipinstitute.com": {
+      "canonicalNames": ["Ozark Leadership Institute"]
+    },
+    "onwardlx.com": {
+      "canonicalNames": ["Onward"]
     }
   }
 }

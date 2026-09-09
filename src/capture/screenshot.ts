@@ -21,6 +21,13 @@ const FREEZE_CSS = `
 html { scroll-behavior: auto !important; }
 `;
 
+/** One readable chunk of page copy, as rendered. */
+export interface TextBlock {
+  /** Element tag, lowercased -- gives the reviewer somewhere to look. */
+  tag: string;
+  text: string;
+}
+
 export interface CaptureResult {
   url: string;
   ok: boolean;
@@ -29,11 +36,14 @@ export interface CaptureResult {
   blocked: boolean;
   height: number;
   links: string[];
+  /** Empty unless `extractText` was requested. */
+  textBlocks: TextBlock[];
+  /** The PNG itself. Absent when the capture failed. */
+  buffer?: Buffer;
   error?: string;
 }
 
 export interface CaptureOptions {
-  path: string;
   mask?: string[];
   /**
    * Selectors removed from layout (display:none) BEFORE the page is measured.
@@ -48,6 +58,14 @@ export interface CaptureOptions {
   hide?: string[];
   navTimeoutMs?: number;
   idleTimeoutMs?: number;
+  /**
+   * Collect page copy for the proofreader.
+   *
+   * Only requested at ONE breakpoint. The text is identical across widths --
+   * responsive CSS changes layout, not words -- so extracting it three times
+   * would triple the work and then throw two thirds of it away.
+   */
+  extractText?: boolean;
 }
 
 export async function capturePage(
@@ -55,7 +73,13 @@ export async function capturePage(
   url: string,
   opts: CaptureOptions,
 ): Promise<CaptureResult> {
-  const { path, mask = [], hide = [], navTimeoutMs = 45_000, idleTimeoutMs = 8_000 } = opts;
+  const {
+    mask = [],
+    hide = [],
+    navTimeoutMs = 45_000,
+    idleTimeoutMs = 8_000,
+    extractText = false,
+  } = opts;
   const page = await ctx.newPage();
 
   try {
@@ -227,8 +251,47 @@ export async function capturePage(
         .filter(Boolean),
     );
 
-    await page.screenshot({
-      path,
+    // Page copy, read from the RENDERED dom for the same reason links are: text
+    // injected or rewritten by JS is text a visitor sees, and fetching the HTML
+    // separately would miss it.
+    //
+    // Only the outermost matching element is kept -- a <li> wrapping a <p>
+    // would otherwise report the same sentence twice, once nested inside the
+    // other, and the reviewer would see a duplicate finding for a single typo.
+    // Same anonymous-callback rule as everywhere else in this file.
+    const textBlocks: TextBlock[] = extractText
+      ? await page.evaluate(() => {
+          const SELECTOR =
+            'p,li,h1,h2,h3,h4,h5,h6,td,th,blockquote,figcaption,dt,dd,summary,label,button,a';
+          const seen = new Set<string>();
+          const out: { tag: string; text: string }[] = [];
+
+          for (const el of Array.from(document.querySelectorAll(SELECTOR))) {
+            if (el.parentElement && el.parentElement.closest(SELECTOR)) continue;
+
+            // innerText, not textContent: it reflects what is actually rendered,
+            // so display:none blocks and the elements hidden by config return ''.
+            const raw = (el as HTMLElement).innerText;
+            if (!raw) continue;
+
+            const text = raw.replace(/\s+/g, ' ').trim();
+            // Below this length a "block" is a nav label or a bare number, which
+            // produces noise in every checker and signal in none.
+            if (text.length < 12) continue;
+            if (seen.has(text)) continue;
+
+            seen.add(text);
+            out.push({ tag: el.tagName.toLowerCase(), text });
+            if (out.length >= 600) break;
+          }
+
+          return out;
+        })
+      : [];
+
+    // No `path`: the buffer goes to content-addressed storage under the hash of
+    // these bytes, so writing it to a per-run filename here would be a detour.
+    const buffer = await page.screenshot({
       fullPage: true,
       animations: 'disabled',
       caret: 'hide',
@@ -236,7 +299,16 @@ export async function capturePage(
       ...(mask.length ? { mask: mask.map((sel) => page.locator(sel)) } : {}),
     });
 
-    return { url, ok: status >= 200 && status < 400, status, blocked, height, links };
+    return {
+      url,
+      ok: status >= 200 && status < 400,
+      status,
+      blocked,
+      height,
+      links,
+      textBlocks,
+      buffer,
+    };
   } catch (err) {
     return {
       url,
@@ -245,6 +317,7 @@ export async function capturePage(
       blocked: false,
       height: 0,
       links: [],
+      textBlocks: [],
       error: err instanceof Error ? err.message : String(err),
     };
   } finally {

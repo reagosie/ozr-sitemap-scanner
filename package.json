@@ -12,6 +12,12 @@
     "report": "tsx src/cli.ts report",
     "serve": "tsx src/cli.ts serve",
     "runs": "tsx src/cli.ts runs",
+    "links": "tsx src/cli.ts links",
+    "proofread": "tsx src/cli.ts proofread",
+    "dismiss": "tsx src/cli.ts dismiss",
+    "migrate": "tsx src/cli.ts migrate",
+    "where": "tsx src/cli.ts where",
+    "diff": "tsx src/cli.ts diff",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "postinstall": "playwright install chromium"
@@ -20,12 +26,21 @@
     "node": ">=20"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1128.0",
+    "@aws-sdk/s3-request-presigner": "^3.1128.0",
     "commander": "^12.1.0",
+    "dictionary-en": "^4.0.0",
     "fast-xml-parser": "^4.5.0",
+    "nspell": "^2.1.5",
     "p-limit": "^6.1.0",
     "pixelmatch": "^6.0.0",
     "playwright": "^1.48.0",
     "pngjs": "^7.0.0",
+    "retext": "^9.0.0",
+    "retext-indefinite-article": "^5.0.0",
+    "retext-quotes": "^6.0.2",
+    "retext-repeated-words": "^5.0.0",
+    "retext-sentence-spacing": "^6.0.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {

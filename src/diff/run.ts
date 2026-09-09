@@ -1,9 +1,10 @@
-import path from 'node:path';
+import { createHash } from 'node:crypto';
 import pLimit from 'p-limit';
-import { compareShots, type DiffResult } from './compare.js';
+import { compareShots, unchangedByHash, type DiffResult } from './compare.js';
+import { blobKey } from '../store/runs.js';
+import type { StorageBackend } from '../store/backend.js';
 import type { BreakpointSpec } from '../capture/browser.js';
 import type { PageCapture } from '../capture/run.js';
-import type { RunPaths } from '../store/runs.js';
 import type { Tier } from '../types.js';
 
 export interface PageDiff {
@@ -18,6 +19,14 @@ export interface PageDiff {
   flagged: boolean;
 }
 
+export interface DiffStats {
+  /** Pairs settled by comparing hashes -- no bytes moved. */
+  byHash: number;
+  /** Pairs that needed both images fetched and decoded. */
+  compared: number;
+  bytesFetched: number;
+}
+
 export interface DiffOptions {
   breakpoints: BreakpointSpec[];
   threshold: number;
@@ -25,32 +34,67 @@ export interface DiffOptions {
   onProgress?: (msg: string) => void;
 }
 
+export interface DiffRun {
+  diffs: PageDiff[];
+  stats: DiffStats;
+}
+
 export async function diffRuns(
-  current: RunPaths,
-  baseline: RunPaths,
+  backend: StorageBackend,
+  origin: string,
   captures: PageCapture[],
+  baselineCaptures: PageCapture[] | null,
   opts: DiffOptions,
-): Promise<PageDiff[]> {
+): Promise<DiffRun> {
   const { breakpoints, threshold, concurrency = 4, onProgress = () => {} } = opts;
   const limiter = pLimit(concurrency);
   const out: PageDiff[] = [];
+  const stats: DiffStats = { byHash: 0, compared: 0, bytesFetched: 0 };
   let done = 0;
+
+  const baseByLoc = new Map((baselineCaptures ?? []).map((c) => [c.loc, c]));
 
   await Promise.all(
     captures.map((cap) =>
       limiter(async () => {
         const diffs: Record<string, DiffResult> = {};
+        const basePage = baseByLoc.get(cap.loc);
 
         for (const bp of breakpoints) {
           const shot = cap.breakpoints[bp.name];
           if (!shot) continue;
 
-          diffs[bp.name] = await compareShots(
-            path.join(baseline.shots, shot.file),
-            path.join(current.shots, shot.file),
-            path.join(current.diffs, shot.file),
-            threshold,
-          );
+          const baseShot = basePage?.breakpoints?.[bp.name];
+
+          // The fast path, and the reason a remote baseline is affordable: equal
+          // content hashes mean byte-identical PNGs, so nothing is fetched.
+          if (shot.sha256 && baseShot?.sha256 && shot.sha256 === baseShot.sha256) {
+            diffs[bp.name] = unchangedByHash(shot.height, baseShot.sha256).result;
+            stats.byHash++;
+            continue;
+          }
+
+          const current = shot.sha256 ? await backend.getBuffer(blobKey(origin, shot.sha256)) : null;
+          const baseline = baseShot?.sha256
+            ? await backend.getBuffer(blobKey(origin, baseShot.sha256))
+            : null;
+
+          stats.bytesFetched += (current?.length ?? 0) + (baseline?.length ?? 0);
+          stats.compared++;
+
+          const outcome = compareShots(baseline, current, threshold);
+          if (baseShot?.sha256) outcome.result.baselineSha256 = baseShot.sha256;
+
+          if (outcome.diffBuffer) {
+            const sha = createHash('sha256').update(outcome.diffBuffer).digest('hex');
+            const key = blobKey(origin, sha);
+            if (!(await backend.exists(key))) {
+              await backend.putBuffer(key, outcome.diffBuffer, 'image/png');
+            }
+            outcome.result.diffSha256 = sha;
+          }
+
+          diffs[bp.name] = outcome.result;
         }
 
         const flagged = Object.values(diffs).some((d) => d.status === 'changed');
@@ -72,11 +116,13 @@ export async function diffRuns(
   );
 
   // Most-changed first: the reviewer's queue should open on the worst offender.
-  return out.sort((a, b) => {
+  out.sort((a, b) => {
     const worst = (d: PageDiff) =>
       Math.max(0, ...Object.values(d.breakpoints).map((x) => (x.status === 'changed' ? x.ratio : 0)));
     return worst(b) - worst(a);
   });
+
+  return { diffs: out, stats };
 }
 
 export interface DiffSummary {

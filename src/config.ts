@@ -21,9 +21,59 @@ const SiteConfigSchema = z.object({
   hide: z.array(z.string()).optional(),
   /** URL substrings blocked during capture (chat widgets, ad scripts). */
   blockUrls: z.array(z.string()).optional(),
+  /** Site-specific proper nouns the spellchecker must never flag. */
+  glossary: z.array(z.string()).optional(),
+  /**
+   * Canonical spellings the consistency check treats as correct, so a variant
+   * is reported against the intended form rather than the most frequent one.
+   */
+  canonicalNames: z.array(z.string()).optional(),
 });
 
+/**
+ * Where runs live.
+ *
+ * `auto` means S3 when a bucket is resolvable and local otherwise, so the tool
+ * still runs end to end on a machine with no AWS credentials -- a stated
+ * requirement, and what keeps the local backend honest.
+ */
+const StorageSchema = z
+  .object({
+    backend: z.enum(['auto', 'local', 's3']).default('auto'),
+    /** Overridden by SITEMAP_SCANNER_BUCKET. */
+    bucket: z.string().optional(),
+    region: z.string().default('us-east-2'),
+    /** Runs, screenshots and metadata. */
+    dataPrefix: z.string().default('data'),
+    /** Emailable reports, kept separate so they can outlive the raw data. */
+    reportsPrefix: z.string().default('reports'),
+    /** Root for the local backend, relative to the working directory. */
+    localRoot: z.string().default('runs'),
+  })
+  .default({});
+
+/** Proofreading is on by default and costs nothing -- it is all local libraries. */
+const ProofreadSchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    /**
+     * A word on at least this many distinct pages is site vocabulary, not a
+     * typo. The single most important knob for spelling signal-to-noise: too low
+     * and every staff name is flagged, too high and real typos on popular
+     * templates get whitelisted.
+     */
+    siteWordMinPages: z.number().int().positive().default(5),
+    /** Extra allowlist entries beyond what the corpus supplies. */
+    glossary: z.array(z.string()).default([]),
+    /** Use LanguageTool when Docker is available. */
+    languageTool: z.boolean().default(true),
+    languageToolPort: z.number().int().positive().default(8010),
+  })
+  .default({});
+
 export const ConfigSchema = z.object({
+  storage: StorageSchema,
+  proofread: ProofreadSchema,
   breakpoints: z
     .array(BreakpointSchema)
     .default([

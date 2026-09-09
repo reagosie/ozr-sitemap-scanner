@@ -1,8 +1,7 @@
-import { writeFile, mkdir } from 'node:fs/promises';
-import path from 'node:path';
 import type { PageCapture } from '../capture/run.js';
 import type { PageDiff } from '../diff/run.js';
 import type { LinkCheckReport } from '../crawl/links.js';
+import type { CopyReport } from '../copy/types.js';
 import type { Inventory } from '../types.js';
 
 export interface ReportInput {
@@ -10,6 +9,7 @@ export interface ReportInput {
   captures: PageCapture[];
   diffs: PageDiff[] | null;
   links: LinkCheckReport | null;
+  copy: CopyReport | null;
   runId: string;
   baselineId: string | null;
   breakpoints: { name: string; width: number }[];
@@ -24,11 +24,25 @@ interface Row {
   tier: string;
   lastmod: string | null;
   discoveredVia: string;
-  shots: Record<string, { file: string; height: number; ok: boolean; status: number; blocked: boolean }>;
-  diffs: Record<string, { status: string; ratio: number; heightDelta: number }>;
+  shots: Record<
+    string,
+    { file: string; sha256?: string; height: number; ok: boolean; status: number; blocked: boolean }
+  >;
+  diffs: Record<
+    string,
+    {
+      status: string;
+      ratio: number;
+      heightDelta: number;
+      diffSha256?: string;
+      baselineSha256?: string;
+    }
+  >;
   flagged: boolean;
   worstRatio: number;
   brokenLinks: number;
+  /** Copy findings whose text appears on this page. */
+  copyIssues: number;
 }
 
 function buildRows(input: ReportInput): Row[] {
@@ -42,17 +56,31 @@ function buildRows(input: ReportInput): Row[] {
     for (const ref of r.referrers) brokenByPage.set(ref, (brokenByPage.get(ref) ?? 0) + 1);
   }
 
+  // Copy findings counted per page the same way, so a reviewer scanning the
+  // worklist sees "this page has three typos" without opening the copy section.
+  const copyByPage = new Map<string, number>();
+  for (const f of input.copy?.findings ?? []) {
+    for (const p of f.pages) copyByPage.set(p, (copyByPage.get(p) ?? 0) + 1);
+  }
+
   const rows: Row[] = input.captures.map((c) => {
     const d = diffByLoc.get(c.loc);
     const diffs: Row['diffs'] = {};
     let worstRatio = 0;
 
     for (const [bp, r] of Object.entries(d?.breakpoints ?? {})) {
-      diffs[bp] = { status: r.status, ratio: r.ratio, heightDelta: r.heightDelta };
+      diffs[bp] = {
+        status: r.status,
+        ratio: r.ratio,
+        heightDelta: r.heightDelta,
+        ...(r.diffSha256 ? { diffSha256: r.diffSha256 } : {}),
+        ...(r.baselineSha256 ? { baselineSha256: r.baselineSha256 } : {}),
+      };
       if (r.status === 'changed') worstRatio = Math.max(worstRatio, r.ratio);
     }
 
     const brokenLinks = brokenByPage.get(c.loc) ?? 0;
+    const copyIssues = copyByPage.get(c.loc) ?? 0;
     return {
       loc: c.loc,
       slug: c.slug,
@@ -65,17 +93,25 @@ function buildRows(input: ReportInput): Row[] {
       flagged: Boolean(d?.flagged) || brokenLinks > 0,
       worstRatio,
       brokenLinks,
+      copyIssues,
     };
   });
 
   return rows.sort((a, b) => {
     if (a.flagged !== b.flagged) return a.flagged ? -1 : 1;
     if (b.worstRatio !== a.worstRatio) return b.worstRatio - a.worstRatio;
-    return b.brokenLinks - a.brokenLinks;
+    if (b.brokenLinks !== a.brokenLinks) return b.brokenLinks - a.brokenLinks;
+    return b.copyIssues - a.copyIssues;
   });
 }
 
-export async function buildReport(input: ReportInput, outDir: string): Promise<string> {
+/**
+ * Render the interactive report.
+ *
+ * Returns HTML rather than writing a file: the report may be destined for S3,
+ * and this layer has no business knowing which.
+ */
+export function buildReport(input: ReportInput): string {
   const rows = buildRows(input);
   const inv = input.inventory;
 
@@ -96,6 +132,16 @@ export async function buildReport(input: ReportInput, outDir: string): Promise<s
     hasDiffs: Boolean(input.diffs && input.diffs.length),
     rows,
     linkIssues,
+    copy: input.copy
+      ? {
+          findings: input.copy.findings,
+          counts: input.copy.counts,
+          skipped: input.copy.skipped,
+          dismissed: input.copy.dismissed,
+          blocksChecked: input.copy.blocksChecked,
+          wordsChecked: input.copy.wordsChecked,
+        }
+      : null,
     summary: {
       urls: inv.entries.length,
       captured: input.captures.length,
@@ -104,6 +150,7 @@ export async function buildReport(input: ReportInput, outDir: string): Promise<s
       blockedLinks: input.links?.blocked ?? 0,
       redirects: input.links?.redirects ?? 0,
       recoveredFromRest: inv.entries.filter((e) => e.discoveredVia === 'rest').length,
+      copyFindings: input.copy?.findings.length ?? 0,
     },
     discoveryErrors: inv.errors,
     possiblyMissed: inv.possiblyMissed,
@@ -119,11 +166,7 @@ export async function buildReport(input: ReportInput, outDir: string): Promise<s
   //     REPLACEMENT string, and this payload is full of arbitrary site text.
   // Base64 output is alphanumeric, so neither sequence can occur.
   const b64 = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64');
-  const html = TEMPLATE.replace('__DATA_B64__', () => b64);
-  await mkdir(outDir, { recursive: true });
-  const file = path.join(outDir, 'index.html');
-  await writeFile(file, html, 'utf8');
-  return file;
+  return TEMPLATE.replace('__DATA_B64__', () => b64);
 }
 
 /**
@@ -240,6 +283,10 @@ function esc(s) {
 }
 function pct(r) { return (r * 100).toFixed(3) + '%'; }
 
+// Relative to this report, which lives at <host>/<runId>/report.html, so
+// ../blobs/ lands on the host-level blob store shared by every run.
+function blobUrl(sha) { return '../blobs/' + sha + '.png'; }
+
 document.getElementById('title').textContent = 'Sitemap Scanner - ' + DATA.site;
 document.getElementById('subtitle').textContent =
   'run ' + DATA.runId + (DATA.baselineId ? '  vs baseline ' + DATA.baselineId : '  (no baseline - first run)') +
@@ -253,6 +300,7 @@ var cards = [
   ['Broken links', s.brokenLinks, s.brokenLinks ? 'flag' : 'ok'],
   ['Blocked (not broken)', s.blockedLinks, ''],
   ['Redirects', s.redirects, ''],
+  ['Copy issues', s.copyFindings || 0, s.copyFindings ? 'flag' : 'ok'],
   ['Recovered from REST', s.recoveredFromRest, s.recoveredFromRest ? 'rest' : ''],
   ['Link-checked only', DATA.tierC, '']
 ];
@@ -291,6 +339,71 @@ if (DATA.linkIssues.length) {
         ' <span class="muted">(' + l.referrers.length + ' page' + (l.referrers.length === 1 ? '' : 's') + ')</span></li>';
     }).join('') + (DATA.linkIssues.length > 60 ? '<li>... see links.json for the rest</li>' : '') + '</ul></div>');
 }
+if (DATA.copy) {
+  var CATEGORY_LABELS = {
+    spelling: 'Spelling', grammar: 'Grammar', mechanical: 'Mechanical',
+    consistency: 'Naming consistency', date: 'Possibly out of date'
+  };
+  var COPY_CAP = 150;
+
+  var body = '';
+  if (DATA.copy.skipped.length) {
+    body += '<p class="muted">Not run: ' + DATA.copy.skipped.map(function (s) {
+      return esc(s.check) + ' (' + esc(s.reason) + ')';
+    }).join('; ') + '</p>';
+  }
+
+  if (!DATA.copy.findings.length) {
+    body += '<p class="muted">No copy issues found across ' + DATA.copy.blocksChecked +
+      ' distinct text blocks (' + DATA.copy.wordsChecked.toLocaleString() + ' words).</p>';
+  } else {
+    // Grouped by category, and within a category the sort from copy/run.ts is
+    // preserved: certain findings that appear on the most pages come first.
+    var groups = {};
+    DATA.copy.findings.slice(0, COPY_CAP).forEach(function (f) {
+      (groups[f.category] = groups[f.category] || []).push(f);
+    });
+
+    Object.keys(CATEGORY_LABELS).forEach(function (cat) {
+      var list = groups[cat];
+      if (!list || !list.length) return;
+      body += '<h4 style="margin:14px 0 6px">' + CATEGORY_LABELS[cat] +
+        ' (' + (DATA.copy.counts[cat] || list.length) + ')</h4><ul>';
+
+      list.forEach(function (f) {
+        var cls = f.confidence === 'high' ? 'flag' : '';
+        body += '<li style="margin-bottom:10px">' +
+          '<span class="pill ' + cls + '">' + esc(f.confidence) + '</span> ' +
+          '<strong class="mono">' + esc(f.match) + '</strong> - ' + esc(f.message) +
+          (f.suggestions.length
+            ? ' <span class="muted">suggests: ' + f.suggestions.map(esc).join(', ') + '</span>'
+            : '') +
+          '<div class="muted" style="margin:3px 0">' + esc(f.excerpt) + '</div>' +
+          '<details><summary class="muted">' + f.pages.length + ' page' +
+          (f.pages.length === 1 ? '' : 's') + ' - id ' + esc(f.id) + '</summary><ul>' +
+          f.pages.slice(0, 25).map(function (p) {
+            return '<li><a href="' + esc(p) + '" target="_blank" class="mono">' + esc(p) + '</a></li>';
+          }).join('') +
+          (f.pages.length > 25 ? '<li class="muted">... and ' + (f.pages.length - 25) + ' more</li>' : '') +
+          '</ul></details></li>';
+      });
+
+      body += '</ul>';
+    });
+
+    if (DATA.copy.findings.length > COPY_CAP) {
+      body += '<p class="muted">Showing the first ' + COPY_CAP + ' of ' +
+        DATA.copy.findings.length + '; the rest are in copy.json.</p>';
+    }
+    body += '<p class="muted">A false positive can be retired for good: ' +
+      '<code>npm run scan -- dismiss &lt;site&gt; &lt;id&gt;</code>. ' +
+      'Dismissed findings never reappear' +
+      (DATA.copy.dismissed ? ' (' + DATA.copy.dismissed + ' already hidden).' : '.') + '</p>';
+  }
+
+  alerts.push('<div class="alert"><h3>Copy issues (' + DATA.copy.findings.length + ')</h3>' + body + '</div>');
+}
+
 document.getElementById('alerts').innerHTML = alerts.join('');
 
 var typeSel = document.getElementById('type');
@@ -387,6 +500,9 @@ function detailHtml(r) {
     return r.diffs[bp.name] && r.diffs[bp.name].status === 'changed';
   }).map(function (bp) { return bp.name + ' ' + pct(r.diffs[bp.name].ratio); });
   if (changed.length) reasons.push('visual change at ' + changed.join(', '));
+  if (r.copyIssues) {
+    reasons.push(r.copyIssues + ' copy issue' + (r.copyIssues === 1 ? '' : 's') + ' (see Copy issues above)');
+  }
   if (r.discoveredVia === 'rest') reasons.push('published but MISSING from the sitemap');
   if (reasons.length) out += '<div class="why"><strong>Flagged because:</strong> ' + reasons.join(' &middot; ') + '</div>';
 
@@ -424,21 +540,26 @@ function detailHtml(r) {
     out += '</div>';
   }
 
+  // Images are content-addressed and shared across runs, so every src points at
+  // ../blobs/<sha>.png. The baseline is reached by hash too rather than by
+  // walking into another run's directory - which is what lets an unchanged page
+  // cost nothing to store twice.
   out += '<div class="shots">';
   DATA.breakpoints.forEach(function (bp) {
     var shot = r.shots[bp.name];
-    if (!shot) return;
-    var d = r.diffs[bp.name];
-    var cur = '../shots/' + shot.file;
-    var base = '../../' + DATA.baselineId + '/shots/' + shot.file;
-    var dif = '../diffs/' + shot.file;
+    if (!shot || !shot.sha256) return;
+    var d = r.diffs[bp.name] || {};
     out += '<div class="shot"><h4>' + bp.name + ' - current' +
-      (shot.blocked ? ' (BLOCKED)' : '') + '</h4><img loading="lazy" src="' + cur + '"></div>';
-    if (d && d.status === 'changed') {
-      if (DATA.baselineId) {
-        out += '<div class="shot"><h4>' + bp.name + ' - baseline</h4><img loading="lazy" src="' + base + '"></div>';
+      (shot.blocked ? ' (BLOCKED)' : '') + '</h4><img loading="lazy" src="' + blobUrl(shot.sha256) + '"></div>';
+    if (d.status === 'changed') {
+      if (d.baselineSha256) {
+        out += '<div class="shot"><h4>' + bp.name + ' - baseline</h4><img loading="lazy" src="' +
+          blobUrl(d.baselineSha256) + '"></div>';
       }
-      out += '<div class="shot"><h4>' + bp.name + ' - diff overlay</h4><img loading="lazy" src="' + dif + '"></div>';
+      if (d.diffSha256) {
+        out += '<div class="shot"><h4>' + bp.name + ' - diff overlay</h4><img loading="lazy" src="' +
+          blobUrl(d.diffSha256) + '"></div>';
+      }
     }
   });
   return out + '</div>';

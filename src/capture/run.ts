@@ -1,15 +1,25 @@
-import path from 'node:path';
+import { createHash } from 'node:crypto';
 import pLimit from 'p-limit';
 import { launchBrowser, makeContext, type BreakpointSpec } from './browser.js';
-import { capturePage } from './screenshot.js';
+import { capturePage, type TextBlock } from './screenshot.js';
 import { isCaptured } from '../discover/classify.js';
 import { isUnchanged, lastmodRank } from '../lastmod.js';
 import { slugForUrl } from '../store/urls.js';
-import type { RunPaths } from '../store/runs.js';
+import { blobKey } from '../store/runs.js';
+import type { StorageBackend } from '../store/backend.js';
 import type { Inventory, Tier, UrlEntry } from '../types.js';
 
 export interface ShotResult {
+  /** Human-readable download name. Not a storage key. */
   file: string;
+  /**
+   * SHA-256 of the PNG bytes, and therefore its address in the blob store.
+   *
+   * This doubles as the change oracle: two runs whose hashes match are
+   * byte-identical, so the diff stage can rule the page unchanged without
+   * transferring either image.
+   */
+  sha256?: string;
   height: number;
   ok: boolean;
   status: number;
@@ -26,6 +36,16 @@ export interface PageCapture {
   discoveredVia: 'sitemap' | 'rest';
   breakpoints: Record<string, ShotResult>;
   links: string[];
+  /** Page copy, collected once per page rather than once per breakpoint. */
+  textBlocks?: TextBlock[];
+}
+
+export interface CaptureStats {
+  /** Blobs written. */
+  uploaded: number;
+  /** Blobs already present -- an unchanged page since some earlier run. */
+  reused: number;
+  bytesUploaded: number;
 }
 
 export interface CaptureOptions {
@@ -38,7 +58,14 @@ export interface CaptureOptions {
   changedOnly?: boolean;
   /** Previous run's inventory, required for --changed-only. */
   baseline?: Inventory | null;
+  /** Collect page copy for the proofreader. */
+  extractText?: boolean;
   onProgress?: (msg: string) => void;
+}
+
+export interface CaptureRun {
+  captures: PageCapture[];
+  stats: CaptureStats;
 }
 
 /**
@@ -54,9 +81,9 @@ export function orderForCapture(entries: UrlEntry[]): UrlEntry[] {
 
 export async function captureAll(
   inv: Inventory,
-  paths: RunPaths,
+  backend: StorageBackend,
   opts: CaptureOptions,
-): Promise<PageCapture[]> {
+): Promise<CaptureRun> {
   const {
     breakpoints,
     concurrency,
@@ -66,9 +93,11 @@ export async function captureAll(
     limit,
     changedOnly = false,
     baseline = null,
+    extractText = false,
     onProgress = () => {},
   } = opts;
 
+  const origin = inv.canonicalOrigin;
   let targets = orderForCapture(inv.entries);
 
   if (changedOnly) {
@@ -97,6 +126,15 @@ export async function captureAll(
     });
   }
 
+  // Copy is collected at the WIDEST breakpoint only. The words are the same at
+  // every width -- responsive CSS moves things, it does not rewrite them -- and
+  // the widest layout is the one least likely to have content collapsed away.
+  const textBreakpoint = breakpoints.reduce(
+    (widest, bp) => (bp.width > widest.width ? bp : widest),
+    breakpoints[0] as BreakpointSpec,
+  );
+
+  const stats: CaptureStats = { uploaded: 0, reused: 0, bytesUploaded: 0 };
   const browser = await launchBrowser();
   const linkUnion = new Map<string, Set<string>>();
 
@@ -114,21 +152,41 @@ export async function captureAll(
             const cap = captures.get(entry.loc);
             if (!cap) return;
 
-            const file = `${cap.slug}__${bp.name}.png`;
+            const wantText = extractText && bp.name === textBreakpoint.name;
             const result = await capturePage(ctx, entry.loc, {
-              path: path.join(paths.shots, file),
               mask,
               hide,
+              extractText: wantText,
             });
+
+            const file = `${cap.slug}__${bp.name}.png`;
+            let sha256: string | undefined;
+
+            if (result.buffer) {
+              sha256 = createHash('sha256').update(result.buffer).digest('hex');
+              const key = blobKey(origin, sha256);
+              // The dedup that makes repeat runs nearly free: an unchanged page
+              // produces bytes we already hold, so a HEAD replaces a multi-MB PUT.
+              if (await backend.exists(key)) {
+                stats.reused++;
+              } else {
+                await backend.putBuffer(key, result.buffer, 'image/png');
+                stats.uploaded++;
+                stats.bytesUploaded += result.buffer.length;
+              }
+            }
 
             cap.breakpoints[bp.name] = {
               file,
+              ...(sha256 ? { sha256 } : {}),
               height: result.height,
               ok: result.ok,
               status: result.status,
               blocked: result.blocked,
               ...(result.error ? { error: result.error } : {}),
             };
+
+            if (wantText && result.textBlocks.length) cap.textBlocks = result.textBlocks;
 
             const set = linkUnion.get(entry.loc) ?? new Set<string>();
             for (const l of result.links) set.add(l);
@@ -159,5 +217,5 @@ export async function captureAll(
     if (cap) cap.links = [...set];
   }
 
-  return [...captures.values()];
+  return { captures: [...captures.values()], stats };
 }
