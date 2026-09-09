@@ -31,6 +31,7 @@
     "@aws-sdk/s3-request-presigner": "^3.1128.0",
     "commander": "^12.1.0",
     "dictionary-en": "^4.0.0",
+    "dictionary-en-gb": "^3.0.0",
     "fast-xml-parser": "^4.5.0",
     "nspell": "^2.1.5",
     "p-limit": "^6.1.0",

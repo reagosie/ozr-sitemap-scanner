@@ -39,6 +39,8 @@ export interface PageCapture {
   links: string[];
   /** Page copy, collected once per page rather than once per breakpoint. */
   textBlocks?: TextBlock[];
+  /** Anchor text per href. Absent on runs captured before this was recorded. */
+  linkTexts?: Record<string, string>;
 }
 
 export interface CaptureStats {
@@ -148,6 +150,7 @@ export async function captureAll(
   const stats: CaptureStats = { uploaded: 0, reused: 0, bytesUploaded: 0 };
   const browser = await launchBrowser();
   const linkUnion = new Map<string, Set<string>>();
+  const textUnion = new Map<string, Record<string, string>>();
 
   try {
     for (const bp of breakpoints) {
@@ -203,6 +206,12 @@ export async function captureAll(
             for (const l of result.links) set.add(l);
             linkUnion.set(entry.loc, set);
 
+            const texts = textUnion.get(entry.loc) ?? {};
+            for (const [href, text] of Object.entries(result.linkTexts)) {
+              if (!texts[href]) texts[href] = text;
+            }
+            textUnion.set(entry.loc, texts);
+
             reporter.tick();
             if (!result.ok) {
               reporter.log(
@@ -224,7 +233,10 @@ export async function captureAll(
 
   for (const [loc, set] of linkUnion) {
     const cap = captures.get(loc);
-    if (cap) cap.links = [...set];
+    if (!cap) continue;
+    cap.links = [...set];
+    const texts = textUnion.get(loc);
+    if (texts && Object.keys(texts).length) cap.linkTexts = texts;
   }
 
   return { captures: [...captures.values()], stats };

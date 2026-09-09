@@ -244,7 +244,7 @@ async function presignAll(
 }
 
 interface Findings {
-  broken: { url: string; status: number; verdict: string; pages: string[] }[];
+  broken: { url: string; status: number; verdict: string; pages: string[]; anchorTexts?: string[] }[];
   copy: NonNullable<ReportInput['copy']>['findings'];
   copyCounts: Record<string, number>;
   copySkipped: { check: string; reason: string }[];
@@ -253,11 +253,31 @@ interface Findings {
   errors: string[];
 }
 
+/**
+  * What the link actually says on the page.
+  *
+  * A URL and a page count are not enough to find a link. Seven campotx pages
+  * linked to a malformed address whose clickable text was the full stop at the
+  * end of a sentence -- the report named the URL, the owner searched the page,
+  * found nothing, and concluded the report was wrong. It was not.
+  */
+function anchorNote(texts?: string[]): string {
+  if (!texts?.length) return '';
+  const shown = texts.map((t) => (t ? `"${esc(t)}"` : '(no link text)')).join(', ');
+  return ` &middot; linked from ${shown}`;
+}
+
 function buildFindings(input: ReportInput): Findings {
   const all = [...(input.links?.internal ?? []), ...(input.links?.external ?? [])];
   const broken = all
     .filter((r) => r.verdict === 'broken' || r.verdict === 'error')
-    .map((r) => ({ url: r.url, status: r.status, verdict: r.verdict, pages: r.referrers }))
+    .map((r) => ({
+      url: r.url,
+      status: r.status,
+      verdict: r.verdict,
+      pages: r.referrers,
+      ...(r.anchorTexts?.length ? { anchorTexts: r.anchorTexts } : {}),
+    }))
     .sort((a, b) => b.pages.length - a.pages.length);
 
   return {
@@ -321,7 +341,7 @@ function renderHtml(
           (b) => `<div class="item">
             <div class="head"><span class="badge bad">${esc(b.status || b.verdict)}</span>
             <code>${esc(b.url)}</code></div>
-            <div class="meta">Linked from ${b.pages.length} page${b.pages.length === 1 ? '' : 's'}</div>
+            <div class="meta">Linked from ${b.pages.length} page${b.pages.length === 1 ? '' : 's'}${anchorNote(b.anchorTexts)}</div>
             ${pageList(b.pages)}
           </div>`,
         )
@@ -473,7 +493,7 @@ function renderHtml(
     ${cards.map(([label, n]) => `<div class="card"><div class="n">${esc(n)}</div><div class="l">${esc(label)}</div></div>`).join('')}
   </div>
 
-  ${section('Broken links', brokenBody, 'Each link is listed once, with the pages it appears on. A link in the site-wide header or footer will show a large page count.')}
+  ${section('Broken links', brokenBody, 'Each link is listed once, with the pages it appears on and the text it is linked from. A link in the site-wide header or footer will show a large page count.')}
   ${section('Copy issues', copyBody, f.copySkipped.length ? `Not run: ${f.copySkipped.map((s) => `${esc(s.check)} (${esc(s.reason)})`).join('; ')}` : '')}
   ${section('Discovery', discoveryBody)}
   ${section(

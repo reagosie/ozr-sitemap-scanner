@@ -15,6 +15,16 @@ export interface LinkResult {
   error?: string;
   /** Pages that link to this URL, so a broken link can actually be fixed. */
   referrers: string[];
+  /**
+   * The clickable text of the anchors pointing here.
+   *
+   * A URL and a page count are not enough to find a link. Seven campotx pages
+   * linked to a malformed address whose anchor text was the full stop at the
+   * end of a sentence; the report named the URL and the owner could not find it
+   * on the page, and reasonably concluded the report was wrong. An empty string
+   * here means the anchor had no text at all, which is itself the answer.
+   */
+  anchorTexts?: string[];
 }
 
 export interface LinkCheckReport {
@@ -62,7 +72,7 @@ function verdictFor(
  * the pages that reference it.
  */
 export function collectLinks(
-  pages: { loc: string; links: string[] }[],
+  pages: { loc: string; links: string[]; linkTexts?: Record<string, string> }[],
   canonicalOrigin: string,
 ): Map<string, string[]> {
   const targets = new Map<string, string[]>();
@@ -82,9 +92,38 @@ export function collectLinks(
   return targets;
 }
 
+/**
+ * Anchor text per canonical URL, keyed the same way `collectLinks` keys targets.
+ *
+ * Separate from `collectLinks` so runs captured before anchor text was recorded
+ * still check their links -- they simply produce an empty map and a report
+ * without the column.
+ */
+export function collectAnchorTexts(
+  pages: { loc: string; links: string[]; linkTexts?: Record<string, string> }[],
+): Map<string, string[]> {
+  const byUrl = new Map<string, Set<string>>();
+
+  for (const page of pages) {
+    for (const [raw, text] of Object.entries(page.linkTexts ?? {})) {
+      const url = canonicalizeUrl(raw);
+      if (!url) continue;
+      const set = byUrl.get(url) ?? new Set<string>();
+      set.add(text);
+      byUrl.set(url, set);
+    }
+  }
+
+  // At most three: enough to show the link is labelled inconsistently, without
+  // turning one broken URL into a wall of text.
+  return new Map([...byUrl].map(([url, set]) => [url, [...set].slice(0, 3)]));
+}
+
 export interface CheckOptions {
   canonicalOrigin: string;
   checkExternal: boolean;
+  /** From `collectAnchorTexts`. Omitted for runs captured without it. */
+  anchorTexts?: Map<string, string[]>;
   concurrency?: number;
   externalConcurrency?: number;
   reporter?: Reporter;
@@ -97,6 +136,7 @@ export async function checkLinks(
   const {
     canonicalOrigin,
     checkExternal,
+    anchorTexts,
     // Deliberately low. WP Engine + Cloudflare rate-limited a 4-way internal
     // check across ~1,900 URLs; the link pass runs straight after the capture
     // pass, so the site has already had sustained traffic from us.
@@ -125,6 +165,9 @@ export async function checkLinks(
     }
 
     const internal = isInternal(url, canonicalOrigin);
+    const texts = anchorTexts?.get(url);
+    const labelled = texts?.length ? { anchorTexts: texts } : {};
+
     if (res.status === 0) {
       return {
         url,
@@ -132,6 +175,7 @@ export async function checkLinks(
         status: 0,
         verdict: 'error',
         ...(res.error ? { error: res.error } : {}),
+        ...labelled,
         referrers,
       };
     }
@@ -143,6 +187,7 @@ export async function checkLinks(
       status: res.status,
       verdict,
       ...(res.url && res.url !== url ? { finalUrl: res.url } : {}),
+      ...labelled,
       referrers,
     };
   };

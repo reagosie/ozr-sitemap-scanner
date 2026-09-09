@@ -1,5 +1,6 @@
 import nspell from 'nspell';
 import dictionary from 'dictionary-en';
+import british from 'dictionary-en-gb';
 import {
   excerptAround,
   findingId,
@@ -54,11 +55,185 @@ export interface Speller {
  * dictionary files is the slowest part of either.
  */
 export async function loadSpeller(): Promise<Speller> {
-  return nspell({
-    aff: Buffer.from(dictionary.aff),
-    dic: Buffer.from(dictionary.dic),
-  });
+  const us = nspell({ aff: Buffer.from(dictionary.aff), dic: Buffer.from(dictionary.dic) });
+  const gb = nspell({ aff: Buffer.from(british.aff), dic: Buffer.from(british.dic) });
+
+  return {
+    // A word correct in EITHER variety is not a misspelling.
+    //
+    // The US-only dictionary flagged "cancelled", "amongst", "organise",
+    // "favourite" and "traveller" as errors on a real run. They are not errors,
+    // they are British spellings, and reporting them as typos is exactly the
+    // cry-wolf failure this checker is supposed to avoid. Whether a site should
+    // pick one variety and stick to it is a CONSISTENCY question -- two
+    // spellings of one word across the site -- not a spelling one.
+    correct: (word) => us.correct(word) || gb.correct(word),
+    // Suggestions come from US English only, so the fix offered for a genuine
+    // typo is in the variety the sites actually write in.
+    suggest: (word) => us.suggest(word),
+  };
 }
+
+/**
+ * Prefixes that are not standalone words but are not typos either.
+ *
+ * "pre-order", "non-refundable", "co-ed", "all-inclusive": the dictionary has
+ * no entry for the prefix, so requiring every hyphenated part to be a word
+ * flagged the whole compound.
+ */
+const HYPHEN_PREFIXES = new Set([
+  'pre', 'post', 'non', 'anti', 'co', 're', 'sub', 'multi', 'semi', 'inter',
+  'over', 'under', 'self', 'ex', 'mid', 'micro', 'mini', 'ultra', 'pro', 'de',
+  'un', 'bi', 'tri', 'all', 'well', 'cross', 'off', 'on', 'in', 'out', 'up',
+]);
+
+const VOWELS = 'aeiou';
+const isVowel = (ch: string): boolean => VOWELS.includes(ch);
+
+/**
+ * Does adding -ing/-ed to this stem require doubling the final consonant?
+ *
+ * This is the guard that keeps suffix-stripping from laundering the single most
+ * common class of English typo. Without it, "swiming" strips to "swim", "runing"
+ * to "run" and "begining" to "begin" -- all real words, so all three would be
+ * accepted as correctly spelled. English doubles a final consonant after a
+ * consonant-vowel-consonant ending, so a stem that meets that test proves the
+ * word was written wrong rather than proving it was written right.
+ */
+function needsDoubling(stem: string): boolean {
+  const s = stem.toLowerCase();
+  if (s.length < 3) return false;
+  const c1 = s.at(-3)!;
+  const v = s.at(-2)!;
+  const c2 = s.at(-1)!;
+  return !isVowel(c1) && isVowel(v) && !isVowel(c2) && !'wxy'.includes(c2);
+}
+
+/** Plural and possessive endings, which never trigger consonant doubling. */
+const PLURAL_SUFFIXES: [RegExp, string[]][] = [
+  [/ies$/, ['y']],
+  [/ves$/, ['f', 'fe']],
+  [/(ses|xes|zes|ches|shes)$/, ['']],
+  [/s$/, ['']],
+];
+
+/** Verbal endings, which do -- and are therefore guarded by `needsDoubling`. */
+const VERBAL_SUFFIXES: [RegExp, string[]][] = [
+  [/ing$/, ['', 'e']],
+  [/ed$/, ['', 'e']],
+];
+
+/**
+ * True when the word is a regular inflection of something the dictionary knows.
+ *
+ * The Hunspell affix rules do not derive every form: "verification" is in the
+ * dictionary and "verifications" is not, likewise "training"/"trainings" and
+ * "wearable"/"wearables". All three were reported as misspellings on a real run.
+ */
+function inflectionIsSpelled(word: string, correct: (w: string) => boolean): boolean {
+  const lower = word.toLowerCase();
+
+  for (const [re, replacements] of PLURAL_SUFFIXES) {
+    const m = re.exec(lower);
+    if (!m) continue;
+    for (const sub of replacements) {
+      const stem = lower.slice(0, m.index) + sub;
+      if (stem.length >= 3 && correct(stem)) return true;
+    }
+  }
+
+  for (const [re, replacements] of VERBAL_SUFFIXES) {
+    const m = re.exec(lower);
+    if (!m) continue;
+    const base = lower.slice(0, m.index);
+    for (const sub of replacements) {
+      const stem = base + sub;
+      // For the silent-e form ("uploade" is not a word, "upload" is), the
+      // doubling test applies to the base rather than to the stem with its e.
+      if (stem.length >= 4 && correct(stem) && !needsDoubling(sub === 'e' ? base : stem)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+/**
+ * True when the word is two dictionary words run together.
+ *
+ * "woodshop", "bunkhouse", "wristband", "handcrafted": ordinary closed
+ * compounds that no dictionary lists exhaustively, because English forms them
+ * productively. Both halves must be substantial, and the word must not sit one
+ * edit from a real word -- "writting" splits into "writ" and "ting", but it is
+ * one edit from "writing", which is what it actually is.
+ */
+function closedCompoundIsSpelled(
+  word: string,
+  correct: (w: string) => boolean,
+  suggest: (w: string) => string[],
+): boolean {
+  const lower = word.toLowerCase();
+  if (lower.includes('-')) return false;
+
+  const MIN_PART = 4;
+
+  // The closed-list rules run first and unguarded.
+  //
+  // The length floor and the near-a-real-word guard below exist to stop a FREE
+  // split from laundering a typo, which is a real risk when any cut point will
+  // do. Neither applies here: a fixed particle or prefix list cannot be bent
+  // around an arbitrary misspelling. Guarding them anyway cost "checkin", which
+  // is seven letters and one edit from "checking".
+
+  // "checkin", "checkout", "signup", "dropoff", "pickup": a word plus a
+  // particle, which is how half the buttons on a website are labelled. The
+  // particle is too short for the split above, so it gets its own pass against
+  // a closed list rather than a length rule.
+  for (const particle of PARTICLES) {
+    if (!lower.endsWith(particle)) continue;
+    const head = lower.slice(0, -particle.length);
+    if (head.length >= MIN_PART && correct(head)) return true;
+  }
+
+  // "untethered", "rebooked", "nonrefundable": a prefix on a word the
+  // dictionary knows.
+  //
+  // A SHORTER list than the hyphenated one. With a hyphen the author has shown
+  // intent, so "in-" and "on-" are safe to accept; without one they are not.
+  // "independant" is "in" + "dependant" -- and "dependant" is a perfectly good
+  // British noun, so the full list quietly accepted one of the most common
+  // misspellings in English.
+  for (const prefix of CLOSED_PREFIXES) {
+    if (!lower.startsWith(prefix)) continue;
+    const rest = lower.slice(prefix.length);
+    if (rest.length >= MIN_PART && correct(rest)) return true;
+  }
+
+  // The free split needs both guards: any cut point will do, so unlike the
+  // closed lists above it really can be bent around a misspelling. "writting"
+  // splits into "writ" and "ting", but it is one edit from "writing".
+  if (lower.length < 8) return false;
+  const near = suggest(word)
+    .slice(0, 5)
+    .some((s) => editDistance(lower, s.toLowerCase()) <= 1);
+  if (near) return false;
+
+  for (let i = MIN_PART; i <= lower.length - MIN_PART; i++) {
+    if (correct(lower.slice(0, i)) && correct(lower.slice(i))) return true;
+  }
+
+  return false;
+}
+
+/** Particles that close-compound onto a verb or noun in web copy. */
+const PARTICLES = ['in', 'out', 'up', 'off', 'on', 'over', 'down', 'back'];
+
+/** Prefixes safe to accept without a hyphen. See `closedCompoundIsSpelled`. */
+const CLOSED_PREFIXES = [
+  're', 'un', 'non', 'pre', 'post', 'anti', 'multi', 'semi', 'inter',
+  'over', 'under', 'self', 'micro', 'mini', 'ultra', 'cross',
+];
 
 export async function checkSpelling(
   corpus: Corpus,
@@ -85,6 +260,9 @@ export async function checkSpelling(
   for (const entry of opts.glossary) {
     for (const w of words(entry)) allowed.add(normalizeWord(w).toLowerCase());
   }
+
+  /** The dictionary plus everything this site has shown it means to say. */
+  const isKnown = (w: string): boolean => spell.correct(w) || allowed.has(w.toLowerCase());
 
   interface Candidate {
     word: string;
@@ -137,6 +315,11 @@ export async function checkSpelling(
       // for the compound but knows every part, so checking the parts is what a
       // reader would do.
       if (compoundIsSpelled(display, spell, allowed)) continue;
+      // Site vocabulary counts as known here, not just the dictionary. Without
+      // it "zipline" earns its place in the glossary and "ziplining" is still
+      // reported -- and the same for every plural of every staff-coined term.
+      if (inflectionIsSpelled(display, isKnown)) continue;
+      if (closedCompoundIsSpelled(display, isKnown, (w) => spell.suggest(w))) continue;
 
       const existing = candidates.get(lower);
       if (existing) {
@@ -217,10 +400,22 @@ function compoundIsSpelled(
   allowed: Set<string>,
 ): boolean {
   if (!word.includes('-')) return false;
+
+  // The joined form first: "whole-heartedly" is not two words, it is
+  // "wholeheartedly" with a stray hyphen, and splitting it asks the dictionary
+  // about "heartedly", which is not a word on its own.
+  const joined = word.replace(/-/g, '');
+  if (spell.correct(joined) || spell.correct(joined.toLowerCase())) return true;
+
   const parts = word.split('-').filter(Boolean);
   if (parts.length < 2) return false;
   return parts.every(
-    (p) => p.length < 2 || spell.correct(p) || spell.correct(p.toLowerCase()) || allowed.has(p.toLowerCase()),
+    (p) =>
+      p.length < 2 ||
+      spell.correct(p) ||
+      spell.correct(p.toLowerCase()) ||
+      HYPHEN_PREFIXES.has(p.toLowerCase()) ||
+      allowed.has(p.toLowerCase()),
   );
 }
 

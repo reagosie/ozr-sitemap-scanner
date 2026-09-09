@@ -10,13 +10,18 @@ const IMAGE = 'erikvl87/languagetool';
 const CHUNK_CHARS = 10_000;
 
 /**
- * LanguageTool ships its own spellchecker, and it does not know this site.
+ * Disabled because something else here already does the job.
  *
- * Leaving it on would reproduce exactly the "Ozark is not a word" noise that
- * spelling.ts exists to prevent, and would double-report every genuine typo.
- * Grammar is what LanguageTool is here for.
+ * MORFOLOGIK_RULE_EN_US is LanguageTool's own spellchecker, which does not know
+ * this site and would reproduce exactly the "Ozark is not a word" noise that
+ * spelling.ts exists to prevent, and double-report every genuine typo.
+ *
+ * ENGLISH_WORD_REPEAT_RULE is doubled words, which retext-repeated-words
+ * already finds. Leaving both on reported campotx's one real "to to" twice, in
+ * two different sections of the report -- and a reviewer who sees the same
+ * defect listed twice stops trusting the counts.
  */
-const DISABLED_RULES = 'MORFOLOGIK_RULE_EN_US';
+const DISABLED_RULES = 'MORFOLOGIK_RULE_EN_US,ENGLISH_WORD_REPEAT_RULE';
 
 /** Rule categories that duplicate checks retext already does better. */
 const DUPLICATE_CATEGORIES = new Set(['TYPOGRAPHY', 'TYPOS']);
@@ -43,6 +48,34 @@ const CONFIDENCE_BY_ISSUE_TYPE: Record<string, Confidence> = {
   whitespace: 'low',
   uncategorized: 'low',
 };
+
+/**
+ * Rule families that encode house style rather than correctness.
+ *
+ * LanguageTool classifies "all inclusive should be all-inclusive" as issueType
+ * `misspelling`, which the table above ranks as high confidence -- so on campotx
+ * ten hyphenation preferences outranked "a life jackets" and "Buy" for "By".
+ * Whether to hyphenate a compound adjective is a style-guide decision the site
+ * owner gets to make; using the wrong article is not.
+ */
+const STYLE_RULE_PREFIXES = ['EN_COMPOUNDS', 'SENT_START_', 'COMMA_', 'DASH_', 'EN_WORDINESS'];
+const STYLE_RULE_IDS = new Set(['YEAR_OLD_HYPHEN', 'ENGLISH_WORD_REPEAT_BEGINNING_RULE']);
+
+/**
+ * Hedged phrasing, which is LanguageTool saying "preference" out loud.
+ *
+ * Carried alongside the id list because rule ids change and new ones arrive,
+ * but a rule that opens with "consider" or "some style guides suggest" is
+ * telling you it has no authority no matter what it is called.
+ */
+const HEDGED_MESSAGE =
+  /\b(consider using|consider whether|some style guides|is normally spelled|are normally spelled|you can shorten|may be missing|it seems that|it appears that)\b/i;
+
+function isHouseStyle(ruleId: string, message: string): boolean {
+  if (STYLE_RULE_IDS.has(ruleId)) return true;
+  if (STYLE_RULE_PREFIXES.some((p) => ruleId.startsWith(p))) return true;
+  return HEDGED_MESSAGE.test(message);
+}
 
 export interface LanguageToolOptions {
   port: number;
@@ -237,7 +270,9 @@ export async function checkGrammar(
       const replacements = (m.replacements ?? []).map((r) => r.value).slice(0, 3);
       // Unknown issue types stay at medium: new rules should not arrive at the
       // top of the report unannounced, nor be buried where nobody sees them.
-      const confidence: Confidence = CONFIDENCE_BY_ISSUE_TYPE[m.rule?.issueType ?? ''] ?? 'medium';
+      const confidence: Confidence = isHouseStyle(ruleId, m.message)
+        ? 'low'
+        : (CONFIDENCE_BY_ISSUE_TYPE[m.rule?.issueType ?? ''] ?? 'medium');
 
       byKey.set(key, {
         id: findingId('grammar', match, `${ruleId}|${m.message}`),

@@ -283,6 +283,20 @@ function esc(s) {
 }
 function pct(r) { return (r * 100).toFixed(3) + '%'; }
 
+// What the link says on the page.
+//
+// Without this a broken link is a URL and a page count, and the person who has
+// to fix it has no way to find it. On campotx seven pages linked to a malformed
+// address whose clickable text was the full stop ending a sentence -- invisible
+// unless you know to look for it, and the report gave no hint that you should.
+function anchorLabel(l) {
+  if (!l.anchorTexts || !l.anchorTexts.length) return '';
+  var shown = l.anchorTexts.map(function (t) {
+    return t ? '"' + esc(t) + '"' : '(no link text)';
+  }).join(', ');
+  return ' <span class="muted">linked from ' + shown + '</span>';
+}
+
 // Relative to this report, which lives at <host>/<runId>/report.html, so
 // ../blobs/ lands on the host-level blob store shared by every run.
 function blobUrl(sha) { return '../blobs/' + sha + '.png'; }
@@ -336,7 +350,8 @@ if (DATA.linkIssues.length) {
       return '<li><span class="pill ' + cls + '">' + esc(l.verdict) + ' ' + (l.status || '') + '</span> ' +
         '<a href="' + esc(l.url) + '" target="_blank" class="mono">' + esc(l.url) + '</a>' +
         (l.finalUrl ? ' <span class="muted">-> ' + esc(l.finalUrl) + '</span>' : '') +
-        ' <span class="muted">(' + l.referrers.length + ' page' + (l.referrers.length === 1 ? '' : 's') + ')</span></li>';
+        ' <span class="muted">(' + l.referrers.length + ' page' + (l.referrers.length === 1 ? '' : 's') + ')</span>' +
+        anchorLabel(l) + '</li>';
     }).join('') + (DATA.linkIssues.length > 60 ? '<li>... see links.json for the rest</li>' : '') + '</ul></div>');
 }
 if (DATA.copy) {
@@ -521,7 +536,8 @@ function detailHtml(r) {
       return '<li><span class="pill ' + cls + '">' + esc(l.verdict) + (l.status ? ' ' + l.status : '') + '</span>' +
         '<a href="' + esc(l.url) + '" target="_blank" class="mono">' + esc(l.url) + '</a>' +
         (l.finalUrl ? '<span class="muted mono">&rarr; ' + esc(l.finalUrl) + '</span>' : '') +
-        '<span class="muted">on ' + l.referrers.length + ' page' + (l.referrers.length === 1 ? '' : 's') + '</span></li>';
+        '<span class="muted">on ' + l.referrers.length + ' page' + (l.referrers.length === 1 ? '' : 's') + '</span>' +
+        anchorLabel(l) + '</li>';
     };
 
     var needsAction = issues.filter(function (l) { return l.verdict !== 'redirect'; });

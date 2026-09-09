@@ -29,39 +29,86 @@
       "summa",
       "magna",
       "laude",
-      "Juris"
+      "Juris",
+      "impactful",
+      "go-getter",
+      "videographer",
+      "videographers",
+      "heptathlete",
+      "impoundments",
+      "servant-hearted",
+      "https",
+      "http"
     ]
   },
   "breakpoints": [
-    { "name": "mobile", "width": 390 },
-    { "name": "tablet", "width": 768 },
-    { "name": "desktop", "width": 1440 }
+    {
+      "name": "mobile",
+      "width": 390
+    },
+    {
+      "name": "tablet",
+      "width": 768
+    },
+    {
+      "name": "desktop",
+      "width": 1440
+    }
   ],
   "concurrency": 3,
   "diffThreshold": 0.001,
   "retainRuns": 5,
   "sites": {
     "campozark.com": {
-      "hide": [".instagram-gallery-feed"],
-      "blockUrls": ["fbcdn.net", "cdninstagram.com", "instagram.com"],
-      "canonicalNames": ["Camp Ozark", "Ozark"]
+      "hide": [
+        ".instagram-gallery-feed"
+      ],
+      "blockUrls": [
+        "fbcdn.net",
+        "cdninstagram.com",
+        "instagram.com"
+      ],
+      "canonicalNames": [
+        "Camp Ozark",
+        "Ozark"
+      ]
     },
     "campozarkfoundation.org": {
-      "hide": [".instagram-gallery-feed"],
-      "canonicalNames": ["Camp Ozark", "Ozark for All"]
+      "hide": [
+        ".instagram-gallery-feed"
+      ],
+      "canonicalNames": [
+        "Camp Ozark",
+        "Ozark for All"
+      ]
     },
     "campotx.com": {
-      "hide": [".instagram-gallery-feed"],
-      "canonicalNames": ["Camp Ozark Texas"]
+      "hide": [
+        ".instagram-gallery-feed"
+      ],
+      "canonicalNames": [
+        "Camp Ozark Texas"
+      ],
+      "glossary": [
+        "otxranch",
+        "huntotxranch",
+        "epi"
+      ]
     },
     "campwareagle.org": {
-      "canonicalNames": ["Camp War Eagle"]
+      "canonicalNames": [
+        "Camp War Eagle"
+      ]
     },
     "ozarkleadershipinstitute.com": {
-      "canonicalNames": ["Ozark Leadership Institute"]
+      "canonicalNames": [
+        "Ozark Leadership Institute"
+      ]
     },
     "onwardlx.com": {
-      "canonicalNames": ["Onward"]
+      "canonicalNames": [
+        "Onward"
+      ]
     }
   }
 }

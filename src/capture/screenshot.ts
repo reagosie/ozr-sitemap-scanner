@@ -36,6 +36,8 @@ export interface CaptureResult {
   blocked: boolean;
   height: number;
   links: string[];
+  /** Anchor text per href, for locating a broken link on the page. */
+  linkTexts: Record<string, string>;
   /** Empty unless `extractText` was requested. */
   textBlocks: TextBlock[];
   /** The PNG itself. Absent when the capture failed. */
@@ -254,11 +256,30 @@ export async function capturePage(
 
     // Collected at every breakpoint and unioned by the caller: a hamburger nav
     // can expose links at 390px that are absent from the desktop DOM.
-    const links = await page.evaluate(() =>
+    // The anchor's TEXT is collected with it, because a URL alone is not enough
+    // to find the link on the page. On campotx, seven pages linked to a
+    // malformed address whose clickable text was a single full stop at the end
+    // of a sentence -- the report named the URL, and nobody could find it.
+    const anchors = await page.evaluate(() =>
       Array.from(document.querySelectorAll('a[href]'))
-        .map((a) => (a as HTMLAnchorElement).href)
-        .filter(Boolean),
+        .map((a) => ({
+          href: (a as HTMLAnchorElement).href,
+          text: ((a as HTMLElement).innerText || a.getAttribute('aria-label') || '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 80),
+        }))
+        .filter((a) => a.href),
     );
+    const links = anchors.map((a) => a.href);
+    const linkTexts: Record<string, string> = {};
+    for (const a of anchors) {
+      // First non-empty wins; an empty one still records the href so the report
+      // can say the anchor had no text at all, which is itself the explanation.
+      if (linkTexts[a.href] === undefined || (!linkTexts[a.href] && a.text)) {
+        linkTexts[a.href] = a.text;
+      }
+    }
 
     // Page copy, read from the RENDERED dom for the same reason links are: text
     // injected or rewritten by JS is text a visitor sees, and fetching the HTML
@@ -331,6 +352,7 @@ export async function capturePage(
       blocked,
       height,
       links,
+      linkTexts,
       textBlocks,
       buffer,
     };
@@ -342,6 +364,7 @@ export async function capturePage(
       blocked: false,
       height: 0,
       links: [],
+      linkTexts: {},
       textBlocks: [],
       error: err instanceof Error ? err.message : String(err),
     };

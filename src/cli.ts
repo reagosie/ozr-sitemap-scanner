@@ -473,8 +473,9 @@ program
     }
 
     // --- link checking ------------------------------------------------------
-    const { collectLinks, checkLinks } = await import('./crawl/links.js');
+    const { collectLinks, collectAnchorTexts, checkLinks } = await import('./crawl/links.js');
     const targets = collectLinks(captures, origin);
+    const anchorTexts = collectAnchorTexts(captures);
 
     // Tier C URLs are never screenshotted, but they ARE checked here so that
     // excluding them from capture never means excluding them from review.
@@ -487,6 +488,7 @@ program
     const links = await checkLinks(targets, {
       canonicalOrigin: origin,
       checkExternal: opts.external !== false,
+      anchorTexts,
       reporter,
     });
     await backends.data.putJson(keys.links, links);
@@ -645,7 +647,7 @@ program
   .option('--config <path>', 'config file', 'scanner.config.json')
   .action(async (site: string, runId: string | undefined, opts) => {
     const { config, backends, origin } = await context(site, opts.config);
-    const { collectLinks, checkLinks } = await import('./crawl/links.js');
+    const { collectLinks, collectAnchorTexts, checkLinks } = await import('./crawl/links.js');
     const { buildReport } = await import('./report/build.js');
 
     const id = await resolveRunId(backends, origin, runId);
@@ -659,6 +661,7 @@ program
     const manifest = await backends.data.getJson<{ baselineId?: string | null }>(keys.manifest);
 
     const targets = collectLinks(captures, inventory.canonicalOrigin);
+    const anchorTexts = collectAnchorTexts(captures);
     for (const e of inventory.entries) {
       if (e.tier === 'C' && !targets.has(e.loc)) targets.set(e.loc, []);
     }
@@ -666,6 +669,7 @@ program
     log(`\n  re-checking links for ${id}`);
     const links = await checkLinks(targets, {
       canonicalOrigin: inventory.canonicalOrigin,
+      anchorTexts,
       checkExternal: opts.external !== false,
       reporter,
     });
