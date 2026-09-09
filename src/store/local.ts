@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, writeFile, rm, stat } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rmdir, writeFile, rm, stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -109,8 +109,33 @@ export class LocalBackend implements StorageBackend {
   }
 
   async remove(keys: string[]): Promise<void> {
+    const parents = new Set<string>();
     for (const key of keys) {
-      await rm(this.resolve(key), { force: true, recursive: true });
+      const file = this.resolve(key);
+      await rm(file, { force: true, recursive: true });
+      parents.add(path.dirname(file));
+    }
+
+    // S3 has no directories: delete every object under a prefix and the prefix
+    // stops existing. A filesystem keeps the empty folder, and `listRuns` reads
+    // folder names -- so without this, a pruned run comes back as a phantom with
+    // no manifest and no captures, and the next command that resolves "the most
+    // recent run" picks it.
+    for (const dir of parents) await this.removeEmptyUpTo(dir);
+  }
+
+  /** Delete `dir` and its now-empty ancestors, stopping at the backend root. */
+  private async removeEmptyUpTo(dir: string): Promise<void> {
+    const root = path.resolve(this.root);
+    let current = dir;
+    while (current.startsWith(root) && current !== root) {
+      try {
+        if ((await readdir(current)).length) return;
+        await rmdir(current);
+      } catch {
+        return;
+      }
+      current = path.dirname(current);
     }
   }
 

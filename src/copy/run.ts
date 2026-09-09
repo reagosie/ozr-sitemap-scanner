@@ -5,6 +5,7 @@ import { checkConsistency } from './consistency.js';
 import { checkDates } from './dates.js';
 import { checkGrammar } from './languagetool.js';
 import type { CopyCategory, CopyFinding, CopyReport, Confidence } from './types.js';
+import { silentReporter, type Reporter } from '../progress.js';
 
 export interface ProofreadOptions {
   siteWordMinPages: number;
@@ -14,7 +15,7 @@ export interface ProofreadOptions {
   languageToolPort: number;
   /** Finding ids the reviewer has already dismissed. */
   accepted: string[];
-  onProgress?: (msg: string) => void;
+  reporter?: Reporter;
 }
 
 const CONFIDENCE_RANK: Record<Confidence, number> = { high: 0, medium: 1, low: 2 };
@@ -35,7 +36,7 @@ const EMPTY_COUNTS: Record<CopyCategory, number> = {
  * produces a useful report -- LanguageTool is an upgrade, never a requirement.
  */
 export async function proofread(pages: PageText[], opts: ProofreadOptions): Promise<CopyReport> {
-  const { onProgress = () => {} } = opts;
+  const { reporter = silentReporter } = opts;
   const skipped: { check: string; reason: string }[] = [];
 
   const corpus = buildCorpus(pages);
@@ -52,7 +53,7 @@ export async function proofread(pages: PageText[], opts: ProofreadOptions): Prom
     };
   }
 
-  onProgress(
+  reporter.log(
     `    ${corpus.blocks.length} distinct text blocks from ${corpus.totalPages} pages ` +
       `(${corpus.totalWords.toLocaleString()} words)`,
   );
@@ -63,10 +64,10 @@ export async function proofread(pages: PageText[], opts: ProofreadOptions): Prom
   // consistency needs it to tell a brand name from an ordinary word.
   const spell = await loadSpeller();
 
-  onProgress('    mechanical');
+  reporter.log('    mechanical');
   findings.push(...(await checkMechanical(corpus)));
 
-  onProgress('    spelling');
+  reporter.log('    spelling');
   findings.push(
     ...(await checkSpelling(
       corpus,
@@ -75,7 +76,7 @@ export async function proofread(pages: PageText[], opts: ProofreadOptions): Prom
     )),
   );
 
-  onProgress('    consistency');
+  reporter.log('    consistency');
   findings.push(
     ...checkConsistency(corpus, {
       canonicalNames: opts.canonicalNames,
@@ -84,20 +85,20 @@ export async function proofread(pages: PageText[], opts: ProofreadOptions): Prom
     }),
   );
 
-  onProgress('    dates');
+  reporter.log('    dates');
   findings.push(...checkDates(corpus));
 
   if (opts.languageTool) {
-    onProgress('    grammar (LanguageTool)');
+    reporter.log('    grammar (LanguageTool)');
     const grammar = await checkGrammar(corpus, {
       port: opts.languageToolPort,
       autoStart: true,
-      onProgress,
+      reporter,
     });
     findings.push(...grammar.findings);
     if (grammar.skipped) {
       skipped.push({ check: 'grammar', reason: grammar.skipped });
-      onProgress(`    grammar skipped: ${grammar.skipped}`);
+      reporter.log(`    grammar skipped: ${grammar.skipped}`);
     }
   } else {
     skipped.push({ check: 'grammar', reason: 'disabled in config' });

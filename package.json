@@ -16,6 +16,7 @@
     "proofread": "tsx src/cli.ts proofread",
     "dismiss": "tsx src/cli.ts dismiss",
     "migrate": "tsx src/cli.ts migrate",
+    "prune": "tsx src/cli.ts prune",
     "where": "tsx src/cli.ts where",
     "diff": "tsx src/cli.ts diff",
     "build": "tsc",

@@ -8,6 +8,7 @@ import { slugForUrl } from '../store/urls.js';
 import { blobKey } from '../store/runs.js';
 import type { StorageBackend } from '../store/backend.js';
 import type { Inventory, Tier, UrlEntry } from '../types.js';
+import { silentReporter, type Reporter } from '../progress.js';
 
 export interface ShotResult {
   /** Human-readable download name. Not a storage key. */
@@ -62,7 +63,13 @@ export interface CaptureOptions {
   extractText?: boolean;
   /** Regions excluded from the collected copy, but still screenshotted. */
   textIgnoreSelectors?: string[];
-  onProgress?: (msg: string) => void;
+  /**
+   * Names the capture in the progress line. The confirmation pass re-captures
+   * pages with the same function, and labelling both "capture" would read as
+   * the scan having started over.
+   */
+  phaseLabel?: string;
+  reporter?: Reporter;
 }
 
 export interface CaptureRun {
@@ -97,7 +104,8 @@ export async function captureAll(
     baseline = null,
     extractText = false,
     textIgnoreSelectors = [],
-    onProgress = () => {},
+    phaseLabel = 'capture',
+    reporter = silentReporter,
   } = opts;
 
   const origin = inv.canonicalOrigin;
@@ -107,7 +115,7 @@ export async function captureAll(
     const baseByLoc = new Map((baseline?.entries ?? []).map((e) => [e.loc, e]));
     const before = targets.length;
     targets = targets.filter((e) => !isUnchanged(e.lastmod, baseByLoc.get(e.loc)?.lastmod));
-    onProgress(
+    reporter.log(
       `--changed-only: ${targets.length} of ${before} URLs (SPOT-CHECK ONLY - a theme or CSS change ` +
         `alters every page without moving any lastmod, and would be invisible in this mode)`,
     );
@@ -145,9 +153,8 @@ export async function captureAll(
     for (const bp of breakpoints) {
       const ctx = await makeContext(browser, bp, blockUrls);
       const limiter = pLimit(concurrency);
-      let done = 0;
 
-      onProgress(`\n  ${bp.name} (${bp.width}px) - ${targets.length} URLs`);
+      reporter.phase(`${phaseLabel} ${bp.name} (${bp.width}px)`, targets.length);
 
       await Promise.all(
         targets.map((entry) =>
@@ -196,12 +203,9 @@ export async function captureAll(
             for (const l of result.links) set.add(l);
             linkUnion.set(entry.loc, set);
 
-            done++;
-            if (done % 25 === 0 || done === targets.length) {
-              onProgress(`    ${done}/${targets.length}`);
-            }
+            reporter.tick();
             if (!result.ok) {
-              onProgress(
+              reporter.log(
                 `    ${result.blocked ? 'BLOCKED' : 'FAILED'} ${entry.loc} ` +
                   `(${result.error ?? `HTTP ${result.status}`})`,
               );
@@ -210,9 +214,11 @@ export async function captureAll(
         ),
       );
 
+      reporter.endPhase();
       await ctx.close();
     }
   } finally {
+    reporter.endPhase();
     await browser.close().catch(() => {});
   }
 

@@ -6,6 +6,7 @@ import type { StorageBackend } from '../store/backend.js';
 import type { BreakpointSpec } from '../capture/browser.js';
 import type { PageCapture } from '../capture/run.js';
 import type { Tier } from '../types.js';
+import { silentReporter, type Reporter } from '../progress.js';
 
 export interface PageDiff {
   loc: string;
@@ -33,7 +34,7 @@ export interface DiffOptions {
   breakpoints: BreakpointSpec[];
   threshold: number;
   concurrency?: number;
-  onProgress?: (msg: string) => void;
+  reporter?: Reporter;
 }
 
 export interface DiffRun {
@@ -48,14 +49,14 @@ export async function diffRuns(
   baselineCaptures: PageCapture[] | null,
   opts: DiffOptions,
 ): Promise<DiffRun> {
-  const { breakpoints, threshold, concurrency = 4, onProgress = () => {} } = opts;
+  const { breakpoints, threshold, concurrency = 4, reporter = silentReporter } = opts;
   const limiter = pLimit(concurrency);
   const out: PageDiff[] = [];
   const stats: DiffStats = { byHash: 0, newPages: 0, compared: 0, bytesFetched: 0 };
-  let done = 0;
 
   const baseByLoc = new Map((baselineCaptures ?? []).map((c) => [c.loc, c]));
 
+  reporter.phase('diff', captures.length);
   await Promise.all(
     captures.map((cap) =>
       limiter(async () => {
@@ -120,11 +121,11 @@ export async function diffRuns(
           flagged,
         });
 
-        done++;
-        if (done % 50 === 0 || done === captures.length) onProgress(`    ${done}/${captures.length}`);
+        reporter.tick();
       }),
     ),
   );
+  reporter.endPhase();
 
   // Most-changed first: the reviewer's queue should open on the worst offender.
   out.sort((a, b) => {

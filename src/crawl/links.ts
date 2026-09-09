@@ -1,6 +1,7 @@
 import pLimit from 'p-limit';
 import { fetchWithRetry } from './fetcher.js';
 import { canonicalizeUrl, isInternal } from '../store/urls.js';
+import { silentReporter, type Reporter } from '../progress.js';
 
 export type LinkVerdict = 'ok' | 'redirect' | 'broken' | 'blocked' | 'error';
 
@@ -86,7 +87,7 @@ export interface CheckOptions {
   checkExternal: boolean;
   concurrency?: number;
   externalConcurrency?: number;
-  onProgress?: (msg: string) => void;
+  reporter?: Reporter;
 }
 
 export async function checkLinks(
@@ -101,7 +102,7 @@ export async function checkLinks(
     // pass, so the site has already had sustained traffic from us.
     concurrency = 2,
     externalConcurrency = 3,
-    onProgress = () => {},
+    reporter = silentReporter,
   } = opts;
 
   const internalTargets: [string, string[]][] = [];
@@ -111,7 +112,7 @@ export async function checkLinks(
     (isInternal(url, canonicalOrigin) ? internalTargets : externalTargets).push([url, referrers]);
   }
 
-  onProgress(
+  reporter.log(
     `  ${internalTargets.length} internal, ${externalTargets.length} external unique link targets` +
       (checkExternal ? '' : ' (external checking disabled)'),
   );
@@ -148,19 +149,18 @@ export async function checkLinks(
 
   const runBatch = async (entries: [string, string[]][], limitN: number, label: string) => {
     const limiter = pLimit(limitN);
-    let done = 0;
-    return Promise.all(
+    reporter.phase(`links ${label}`, entries.length);
+    const results = await Promise.all(
       entries.map(([url, refs]) =>
         limiter(async () => {
           const r = await check(url, refs);
-          done++;
-          if (done % 100 === 0 || done === entries.length) {
-            onProgress(`    ${label} ${done}/${entries.length}`);
-          }
+          reporter.tick();
           return r;
         }),
       ),
     );
+    reporter.endPhase();
+    return results;
   };
 
   const internal = await runBatch(internalTargets, concurrency, 'internal');

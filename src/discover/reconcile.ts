@@ -6,21 +6,22 @@ import { fetchTaxonomies, fetchTypeCounts, fetchTypeLinks, fetchTypes, isInterna
 import { assignTier, isCaptured, type TierOverrides } from './classify.js';
 import { canonicalizeUrl } from '../store/urls.js';
 import type { Inventory, SubSitemapResult, TypeSummary, UrlEntry } from '../types.js';
+import { silentReporter, type Reporter } from '../progress.js';
 
 export interface DiscoverOptions {
   concurrency?: number;
   tierOverrides?: TierOverrides;
   /** Skip REST cross-check (faster, but loses missed-page detection). */
   skipRest?: boolean;
-  onProgress?: (msg: string) => void;
+  reporter?: Reporter;
 }
 
 export async function discover(site: string, opts: DiscoverOptions = {}): Promise<Inventory> {
-  const { concurrency = 3, tierOverrides = {}, skipRest = false, onProgress = () => {} } = opts;
+  const { concurrency = 3, tierOverrides = {}, skipRest = false, reporter = silentReporter } = opts;
   const errors: string[] = [];
 
   const canonicalOrigin = await resolveCanonicalOrigin(site);
-  onProgress(`canonical origin: ${canonicalOrigin}`);
+  reporter.log(`canonical origin: ${canonicalOrigin}`);
 
   const detection = await detectWordPress(canonicalOrigin);
   if (!detection.isWordPress) {
@@ -29,14 +30,14 @@ export async function discover(site: string, opts: DiscoverOptions = {}): Promis
         `This tool currently supports WordPress sites only.`,
     );
   }
-  onProgress(`WordPress confirmed (${detection.evidence.length} signals)`);
+  reporter.log(`WordPress confirmed (${detection.evidence.length} signals)`);
 
   const robots = await fetchRobots(canonicalOrigin);
   if (!robots.fetched) errors.push(`robots.txt unavailable: ${robots.error}`);
   if (robots.crawlDelay !== null) {
     // Recorded for the record only. Deliberately not obeyed: first-party sites,
     // and a 10s delay would add hours of pure waiting to a full pass.
-    onProgress(`robots.txt declares Crawl-delay: ${robots.crawlDelay} (recorded, not obeyed)`);
+    reporter.log(`robots.txt declares Crawl-delay: ${robots.crawlDelay} (recorded, not obeyed)`);
   }
 
   // --- locate the sitemap index -------------------------------------------
@@ -64,7 +65,7 @@ export async function discover(site: string, opts: DiscoverOptions = {}): Promis
   }
 
   if (!children.length) throw new Error(`No usable sitemap found. Tried:\n  ${indexAttempts.join('\n  ')}`);
-  onProgress(`sitemap index: ${indexUrl} (${children.length} sub-sitemaps)`);
+  reporter.log(`sitemap index: ${indexUrl} (${children.length} sub-sitemaps)`);
 
   const flavor = parseSitemapName(children[0] ?? '').flavor;
 
@@ -74,7 +75,7 @@ export async function discover(site: string, opts: DiscoverOptions = {}): Promis
     children.map((c) =>
       limit(async () => {
         const out = await fetchUrlset(c, canonicalOrigin);
-        onProgress(
+        reporter.log(
           out.result.ok
             ? `  ${out.result.type}: ${out.result.urlCount} urls (${out.result.withLastmod} w/lastmod)`
             : `  ${out.result.type}: FAILED - ${out.result.error}`,
@@ -125,7 +126,7 @@ export async function discover(site: string, opts: DiscoverOptions = {}): Promis
           possiblyMissed.push({ type: t.slug, restCount: t.count as number, restBase: t.restBase });
         }
       }
-      onProgress(`REST cross-check: ${withCounts.length} types, ${possiblyMissed.length} type(s) absent from sitemap`);
+      reporter.log(`REST cross-check: ${withCounts.length} types, ${possiblyMissed.length} type(s) absent from sitemap`);
 
       // For types we would actually capture, enumerate permalinks and set-diff
       // against the sitemap. Restricted to capture tiers so we do not paginate
@@ -158,7 +159,7 @@ export async function discover(site: string, opts: DiscoverOptions = {}): Promis
 
             const sitemapCount = entries.filter((e) => e.type === t.slug).length;
             missingFromSitemap.push({ type: t.slug, sitemapCount, restCount: t.count ?? 0, urls: missing });
-            onProgress(`  ${t.slug}: ${missing.length} published URL(s) missing from the sitemap`);
+            reporter.log(`  ${t.slug}: ${missing.length} published URL(s) missing from the sitemap`);
 
             for (const [loc, modified] of seenMissing) {
               restEntries.push({
@@ -193,7 +194,7 @@ export async function discover(site: string, opts: DiscoverOptions = {}): Promis
     seen.set(e.loc, e);
   }
   entries = [...seen.values()];
-  if (duplicates) onProgress(`deduplicated ${duplicates} repeated URLs`);
+  if (duplicates) reporter.log(`deduplicated ${duplicates} repeated URLs`);
 
   // --- per-type rollup -----------------------------------------------------
   const byType = new Map<string, TypeSummary>();

@@ -3,6 +3,7 @@ import { blobKey, hostDir } from '../store/runs.js';
 import { joinKey } from '../store/backend.js';
 import type { Backends } from '../store/factory.js';
 import type { ReportInput } from './build.js';
+import { silentReporter, type Reporter } from '../progress.js';
 
 export interface PublishOptions {
   /** Flagged pages whose screenshots are embedded. Beyond this, links only. */
@@ -12,7 +13,7 @@ export interface PublishOptions {
   /** Stop embedding once the encoded images pass this, so the file stays mailable. */
   embedBudgetBytes?: number;
   presignSeconds?: number;
-  onProgress?: (msg: string) => void;
+  reporter?: Reporter;
 }
 
 export interface PublishResult {
@@ -55,7 +56,7 @@ export async function publishEmailable(
   opts: PublishOptions = {},
 ): Promise<PublishResult | null> {
   const cfg = { ...DEFAULTS, ...opts };
-  const onProgress = opts.onProgress ?? (() => {});
+  const reporter = opts.reporter ?? silentReporter;
 
   const host = hostDir(origin);
   const date = new Date().toISOString().slice(0, 10);
@@ -89,7 +90,7 @@ export async function publishEmailable(
     const embedded: EmbeddedPage[] = [];
     let embeddedBytes = 0;
 
-    if (flagged.length) onProgress(`    embedding ${flagged.length} flagged page(s)`);
+    if (flagged.length) reporter.log(`    embedding ${flagged.length} flagged page(s)`);
 
     for (const diff of flagged) {
       if (embeddedBytes >= cfg.embedBudgetBytes) break;
@@ -126,7 +127,7 @@ export async function publishEmailable(
     }
 
     const links = canLink ? await presignAll(input, backends, origin, widest.name, cfg.presignSeconds) : [];
-    if (canLink) onProgress(`    ${links.length} presigned screenshot link(s), valid 7 days`);
+    if (canLink) reporter.log(`    ${links.length} presigned screenshot link(s), valid 7 days`);
 
     const html = renderHtml(input, findings, embedded, links, {
       embeddedBytes,

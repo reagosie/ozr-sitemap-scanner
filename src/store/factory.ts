@@ -4,7 +4,7 @@ import type { StorageBackend } from './backend.js';
 export interface Backends {
   /** Runs, screenshots, metadata. */
   data: StorageBackend;
-  /** Emailable HTML and PDF. Separate prefix so it can outlive the raw data. */
+  /** Emailable HTML and PDF. Separate prefix, but pruned with the run that made them. */
   reports: StorageBackend;
   /** True when runs are shared rather than laptop-local. */
   central: boolean;

@@ -5,11 +5,12 @@ import pLimit from 'p-limit';
 import type { Config } from '../config.js';
 import type { Backends } from './factory.js';
 import { blobKey, hostDir, runKeys, setBaseline, RUN_ID_RE } from './runs.js';
+import { silentReporter, type Reporter } from '../progress.js';
 
 export interface MigrateOptions {
   /** Migrate every local run, not just the one the baseline points at. */
   all: boolean;
-  onProgress?: (msg: string) => void;
+  reporter?: Reporter;
 }
 
 export interface MigrateResult {
@@ -75,7 +76,7 @@ export async function migrateLocalRuns(
   origin: string,
   opts: MigrateOptions,
 ): Promise<MigrateResult> {
-  const { onProgress = () => {} } = opts;
+  const { reporter = silentReporter } = opts;
   const host = hostDir(origin);
   const localHostDir = path.resolve(config.storage.localRoot, host);
 
@@ -106,8 +107,8 @@ export async function migrateLocalRuns(
     throw new Error(`baseline ${baselineId} is not present locally; re-run with --all`);
   }
 
-  onProgress(`\n  migrating ${toMigrate.length} run(s) from ${localHostDir}`);
-  onProgress(`  to ${backends.data.describe}\n`);
+  reporter.log(`\n  migrating ${toMigrate.length} run(s) from ${localHostDir}`);
+  reporter.log(`  to ${backends.data.describe}\n`);
 
   let uploaded = 0;
   let reused = 0;
@@ -116,7 +117,7 @@ export async function migrateLocalRuns(
   for (const runId of toMigrate) {
     const runDir = path.join(localHostDir, runId);
     const keys = runKeys(origin, runId);
-    onProgress(`  ${runId}`);
+    reporter.log(`  ${runId}`);
 
     // Metadata first: it is small, and it makes a partially-migrated run
     // recognisable rather than a directory of orphaned blobs.
@@ -133,7 +134,7 @@ export async function migrateLocalRuns(
     const captures = await readJsonFile<LegacyCapture[]>(path.join(runDir, 'captures.json'));
     if (captures) {
       const limiter = pLimit(6);
-      let done = 0;
+      reporter.phase(`upload ${runId}`, captures.length);
 
       await Promise.all(
         captures.map((cap) =>
@@ -158,13 +159,11 @@ export async function migrateLocalRuns(
               }
               cap.breakpoints[bpName] = { ...shot, sha256: sha };
             }
-            done++;
-            if (done % 25 === 0 || done === captures.length) {
-              onProgress(`    shots ${done}/${captures.length}  (${uploaded} uploaded, ${reused} reused)`);
-            }
+            reporter.tick();
           }),
         ),
       );
+      reporter.endPhase();
 
       await backends.data.putJson(keys.captures, captures);
     }
@@ -199,11 +198,11 @@ export async function migrateLocalRuns(
   }
 
   const result = await setBaseline(backends.data, origin, baselineId);
-  onProgress('');
-  onProgress(
+  reporter.log('');
+  reporter.log(
     `  uploaded ${uploaded} blob(s) (${(bytes / 1_048_576).toFixed(1)} MB), reused ${reused}`,
   );
-  onProgress(
+  reporter.log(
     result.ok
       ? `  baseline set to ${baselineId}`
       : `  WARNING: baseline not moved - it already points at ${result.conflictedWith ?? 'another run'}`,

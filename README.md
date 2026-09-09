@@ -26,6 +26,7 @@ npm run report -- https://campozark.com
 
 npm run dismiss -- https://campozark.com <findingId>    # retire a false positive
 npm run migrate -- https://campozark.com                # push local runs to S3
+npm run prune -- https://campozark.com --dry-run        # what would the lifecycle rules remove?
 ```
 
 The site is an argument, not configuration. WordPress is detected and asserted
@@ -269,6 +270,51 @@ noise. Guarding that:
 Re-running `scan --limit 20` twice against an unchanged site is the regression
 test for all of this; the flagged count should be at or near zero.
 
+## Retention
+
+The scanner enforces its own lifecycle. There is **no S3 lifecycle policy to
+configure** -- the rules live in the code, travel with it to any bucket the tool
+is pointed at, and work identically against a local `runs/` directory that AWS
+could never manage.
+
+Two independent rules, applied at the end of every scan and by `prune`:
+
+| rule | default | why |
+| --- | --- | --- |
+| `retainRuns` | 5 newest runs per host | caps a busy site |
+| `retainDays` | runs older than 365 days | caps a quiet one -- at 2-3 scans a year, five runs is two and a half years of screenshots nobody will open |
+
+Removing a run removes its metadata **and its emailable reports**. Screenshots
+are the exception, and this is the part worth understanding: they are addressed
+by content and shared across runs, so a blob is never deleted for being old. A
+screenshot uploaded two years ago is still the current image of every page that
+has not changed since. Blobs leave only by becoming unreferenced by any
+surviving run, and then only after a 7-day grace period so a concurrent scan
+cannot have its fresh uploads collected before its `captures.json` lands.
+
+**The baseline is never pruned**, by either rule. Deleting it is the one
+expensive mistake available here: the next scan would have nothing to compare
+against, call all ~525 pages new, and hand back a report with no change signal
+at all. If a rule would have taken it, the run says so instead.
+
+```bash
+npm run prune -- https://campozark.com --dry-run     # list, remove nothing
+npm run prune -- https://campozark.com               # apply
+npm run runs -- https://campozark.com                # age and fate of each run
+```
+
+## Progress
+
+Long stages print a live progress line with a percentage and an ETA:
+
+```
+  capture desktop (1440px)  [############..........]  56%  129/230  eta 12:41  (41:07 elapsed)
+```
+
+When stdout is not a terminal -- a background task, CI, a pipe -- carriage
+returns would produce garbage, so the same line is printed every 20 seconds
+instead. Set `SITEMAP_SCANNER_PLAIN=1` to force that mode on a real terminal.
+
 ## Commands worth knowing
 
 `links <site> [runId]` re-runs the link check against an existing run, reusing
@@ -278,6 +324,10 @@ settings rather than re-running a whole scan.
 
 `diff <site> --current <id> --baseline <id>` compares two existing runs without
 capturing anything, which is how the capture-determinism regression test works.
+
+`prune <site> [--keep n] [--max-age-days n] [--dry-run]` applies the retention
+rules without running a scan. `--dry-run` is the way to see what a scan is about
+to delete before it deletes it.
 
 ## Config
 
@@ -292,7 +342,8 @@ Top level:
 | `proofread.siteWordMinPages` | pages a word must appear on to count as site vocabulary |
 | `proofread.glossary` | words the spellchecker must never flag |
 | `proofread.languageTool` | use LanguageTool when Docker is available |
-| `retainRuns` | runs kept per host before pruning and blob GC |
+| `retainRuns` | runs kept per host before pruning and blob GC (default 5) |
+| `retainDays` | age at which a run is removed regardless of the count (default 365) |
 
 Per host, under `sites`:
 

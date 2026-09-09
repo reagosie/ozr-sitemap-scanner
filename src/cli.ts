@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
+import { reporter } from './progress.js';
 import { loadConfig, siteConfig, type Config } from './config.js';
 import { discover } from './discover/reconcile.js';
 import { isCaptured } from './discover/classify.js';
@@ -11,6 +12,7 @@ import {
   getBaseline,
   setBaseline,
   pruneRuns,
+  runStartedAt,
   acceptedKey,
 } from './store/runs.js';
 import type { PageCapture } from './capture/run.js';
@@ -30,6 +32,50 @@ const EXIT_SITE_DEFECT = 2;
 
 const program = new Command();
 program.name('sitemap-scanner').description('Crawl, screenshot, link-check, proofread and visually diff a WordPress site.');
+
+/**
+ * Every line this tool prints goes through here.
+ *
+ * Not a style preference: the progress line is repainted in place, and a bare
+ * `console.log` during a phase lands in the middle of it and corrupts the
+ * display. The reporter erases the line, prints, and repaints.
+ */
+const log = (msg = ''): void => reporter.log(msg);
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Say what the lifecycle rules just did, or would do.
+ *
+ * Deletion that happens silently is deletion nobody can audit, and this runs
+ * unattended at the end of every scan. Both rules are named separately because
+ * they answer different questions: "the store is at its limit" is routine,
+ * "a year of history just aged out" is worth noticing.
+ */
+function reportPrune(pruned: import('./store/runs.js').PruneResult, config: Config): void {
+  const verb = pruned.dryRun ? 'would remove' : 'removed';
+
+  if (pruned.removedRuns.length) {
+    log(`  retention (keep ${config.retainRuns}): ${verb} ${pruned.removedRuns.join(', ')}`);
+  }
+  if (pruned.expiredRuns.length) {
+    log(`  expiry (over ${config.retainDays} days): ${verb} ${pruned.expiredRuns.join(', ')}`);
+  }
+  if (pruned.keptBaseline) {
+    log(
+      `  KEPT ${pruned.keptBaseline}: it is the baseline. Removing it would leave the next ` +
+        `scan nothing to compare against, so it stays until a newer run replaces it.`,
+    );
+  }
+  if (pruned.removedBlobs) {
+    log(`  ${pruned.dryRun ? 'would collect' : 'collected'} ${pruned.removedBlobs} unreferenced screenshot(s)`);
+  }
+  if (pruned.removedRuns.length || pruned.expiredRuns.length || pruned.removedBlobs) {
+    log(`  ${pruned.dryRun ? 'would free' : 'freed'} ${mb(pruned.bytesFreed)}`);
+  } else {
+    log(`  lifecycle: nothing to remove (keep ${config.retainRuns}, expire after ${config.retainDays} days)`);
+  }
+}
 
 function pad(s: string, n: number): string {
   return s.length >= n ? s.slice(0, n) : s + ' '.repeat(n - s.length);
@@ -67,14 +113,14 @@ async function resolveRunId(
 
 /** The per-type table. This is what a new site's tier policy gets set from. */
 export function printTypeTable(inv: Inventory): void {
-  console.log('');
-  console.log(pad('TYPE', 26) + pad('KIND', 10) + 'TIER' + rpad('URLS', 8) + rpad('LASTMOD', 9) + rpad('REST', 7));
-  console.log('-'.repeat(66));
+  log('');
+  log(pad('TYPE', 26) + pad('KIND', 10) + 'TIER' + rpad('URLS', 8) + rpad('LASTMOD', 9) + rpad('REST', 7));
+  log('-'.repeat(66));
 
   let captured = 0;
   let linkOnly = 0;
   for (const t of inv.typeSummary) {
-    console.log(
+    log(
       pad(t.type, 26) +
         pad(t.kind, 10) +
         pad(` ${t.tier}`, 4) +
@@ -86,42 +132,42 @@ export function printTypeTable(inv: Inventory): void {
     else linkOnly += t.urls;
   }
 
-  console.log('-'.repeat(66));
-  console.log(`${pad('TOTAL', 26)}${pad('', 10)}    ${rpad(inv.entries.length, 8)}`);
-  console.log('');
-  console.log(`  sitemap flavor   : ${inv.flavor}`);
-  console.log(`  sub-sitemaps     : ${inv.subSitemaps.length} (${inv.subSitemaps.filter((s) => s.ok).length} ok)`);
-  console.log(`  capture set (A+B): ${captured}`);
-  console.log(`  link-check only  : ${linkOnly}`);
+  log('-'.repeat(66));
+  log(`${pad('TOTAL', 26)}${pad('', 10)}    ${rpad(inv.entries.length, 8)}`);
+  log('');
+  log(`  sitemap flavor   : ${inv.flavor}`);
+  log(`  sub-sitemaps     : ${inv.subSitemaps.length} (${inv.subSitemaps.filter((s) => s.ok).length} ok)`);
+  log(`  capture set (A+B): ${captured}`);
+  log(`  link-check only  : ${linkOnly}`);
 
   const noLastmod = inv.entries.filter((e) => !e.lastmod).length;
   if (noLastmod) {
-    console.log(`  without lastmod  : ${noLastmod}  (always captured -- never treated as unchanged)`);
+    log(`  without lastmod  : ${noLastmod}  (always captured -- never treated as unchanged)`);
   }
 
   if (inv.possiblyMissed.length) {
-    console.log('');
-    console.log('  POSSIBLY MISSED - published in REST but absent from the sitemap:');
-    for (const m of inv.possiblyMissed) console.log(`    ${pad(m.type, 24)} ${m.restCount} published`);
+    log('');
+    log('  POSSIBLY MISSED - published in REST but absent from the sitemap:');
+    for (const m of inv.possiblyMissed) log(`    ${pad(m.type, 24)} ${m.restCount} published`);
   }
 
   if (inv.missingFromSitemap.length) {
     const total = inv.missingFromSitemap.reduce((n, m) => n + m.urls.length, 0);
-    console.log('');
-    console.log(`  MISSING FROM SITEMAP - ${total} published URL(s), recovered from REST and added to the inventory:`);
+    log('');
+    log(`  MISSING FROM SITEMAP - ${total} published URL(s), recovered from REST and added to the inventory:`);
     for (const m of inv.missingFromSitemap) {
-      console.log(`    ${pad(m.type, 22)} sitemap ${m.sitemapCount}  vs  REST ${m.restCount}   (+${m.urls.length})`);
-      for (const u of m.urls.slice(0, 5)) console.log(`      ${u}`);
-      if (m.urls.length > 5) console.log(`      ... and ${m.urls.length - 5} more (full list in inventory.json)`);
+      log(`    ${pad(m.type, 22)} sitemap ${m.sitemapCount}  vs  REST ${m.restCount}   (+${m.urls.length})`);
+      for (const u of m.urls.slice(0, 5)) log(`      ${u}`);
+      if (m.urls.length > 5) log(`      ... and ${m.urls.length - 5} more (full list in inventory.json)`);
     }
   }
 
   if (inv.errors.length) {
-    console.log('');
-    console.log('  ERRORS - inventory is INCOMPLETE:');
-    for (const e of inv.errors) console.log(`    ${e}`);
+    log('');
+    log('  ERRORS - inventory is INCOMPLETE:');
+    for (const e of inv.errors) log(`    ${e}`);
   }
-  console.log('');
+  log('');
 }
 
 /** Run the copy checks and store the result. Never fails the run. */
@@ -143,17 +189,17 @@ async function runProofread(
     languageTool: config.proofread.languageTool,
     languageToolPort: config.proofread.languageToolPort,
     accepted,
-    onProgress: (m) => console.log(m),
+    reporter,
   });
 
   const c = copy.counts;
-  console.log(
+  log(
     `  copy: ${copy.findings.length} finding(s) - ` +
       `${c.spelling} spelling, ${c.grammar} grammar, ${c.mechanical} mechanical, ` +
       `${c.consistency} consistency, ${c.date} date` +
       (copy.dismissed ? `  (${copy.dismissed} previously dismissed)` : ''),
   );
-  for (const s of copy.skipped) console.log(`    ${s.check} skipped: ${s.reason}`);
+  for (const s of copy.skipped) log(`    ${s.check} skipped: ${s.reason}`);
 
   return copy;
 }
@@ -178,14 +224,14 @@ async function writeReports(
   await backends.data.putBuffer(reportKey, Buffer.from(html, 'utf8'), 'text/html; charset=utf-8');
 
   const published = await publishEmailable(input, backends, origin, {
-    onProgress: (m) => console.log(m),
+    reporter,
   });
 
-  console.log('');
-  console.log(`  report:    ${backends.data.describe}/${reportKey}`);
+  log('');
+  log(`  report:    ${backends.data.describe}/${reportKey}`);
   if (published) {
-    console.log(`  emailable: ${published.htmlKey}  (${mb(published.htmlBytes)})`);
-    console.log(`             ${published.pdfKey}  (${mb(published.pdfBytes)})`);
+    log(`  emailable: ${published.htmlKey}  (${mb(published.htmlBytes)})`);
+    log(`             ${published.pdfKey}  (${mb(published.pdfBytes)})`);
   }
 }
 
@@ -204,12 +250,12 @@ program
     const backends = await createBackends(config);
     const concurrency = opts.concurrency ?? config.concurrency;
 
-    console.log(`\nSitemap Scanner - discovering ${site}`);
-    console.log(`  storage: ${backends.data.describe}${backends.central ? '' : '  (local - runs are not shared)'}\n`);
+    log(`\nSitemap Scanner - discovering ${site}`);
+    log(`  storage: ${backends.data.describe}${backends.central ? '' : '  (local - runs are not shared)'}\n`);
 
     const inv = await discover(site, {
       concurrency,
-      onProgress: (m) => console.log(m),
+      reporter,
     });
 
     const origin = inv.canonicalOrigin;
@@ -247,10 +293,10 @@ program
       errors: inv.errors,
     });
 
-    console.log(`  run: ${runId}`);
+    log(`  run: ${runId}`);
     if (inv.errors.length) {
-      console.log('\n  Inventory is incomplete - see errors above.');
-      console.log('  (exit 2: the run still completes; this flags a defect in the SITE, not the scan)\n');
+      log('\n  Inventory is incomplete - see errors above.');
+      log('  (exit 2: the run still completes; this flags a defect in the SITE, not the scan)\n');
       // Exit 2, not 1.
       //
       // campozark declares ozrsession-sitemap.xml in its sitemap index and
@@ -273,9 +319,9 @@ program
       : null;
 
     if (opts.changedOnly && !baselineInv) {
-      console.log('  --changed-only ignored: no baseline run to compare against; capturing everything.');
+      log('  --changed-only ignored: no baseline run to compare against; capturing everything.');
     }
-    console.log(`  baseline: ${baselineId ?? '(none - this run becomes the baseline)'}`);
+    log(`  baseline: ${baselineId ?? '(none - this run becomes the baseline)'}`);
 
     const wantProofread = opts.proofread !== false && config.proofread.enabled;
 
@@ -290,7 +336,7 @@ program
       baseline: baselineInv,
       extractText: wantProofread,
       textIgnoreSelectors: [...config.proofread.ignoreSelectors, ...(sc.ignoreSelectors ?? [])],
-      onProgress: (m) => console.log(m),
+      reporter,
     });
     let captures = run.captures;
 
@@ -300,33 +346,33 @@ program
     const failed = captures.filter((c) => Object.values(c.breakpoints).some((b) => !b.ok && !b.blocked)).length;
     const blocked = captures.filter((c) => Object.values(c.breakpoints).some((b) => b.blocked)).length;
 
-    console.log('');
-    console.log(`  captured ${captures.length} URLs x ${config.breakpoints.length} breakpoints = ${shots} screenshots`);
-    console.log(
+    log('');
+    log(`  captured ${captures.length} URLs x ${config.breakpoints.length} breakpoints = ${shots} screenshots`);
+    log(
       `  blobs: ${run.stats.uploaded} new (${mb(run.stats.bytesUploaded)}), ` +
         `${run.stats.reused} reused from earlier runs`,
     );
-    if (failed) console.log(`  ${failed} URL(s) failed to capture`);
-    if (blocked) console.log(`  ${blocked} URL(s) blocked by bot protection (not counted as broken)`);
+    if (failed) log(`  ${failed} URL(s) failed to capture`);
+    if (blocked) log(`  ${blocked} URL(s) blocked by bot protection (not counted as broken)`);
 
     let diffs: PageDiff[] | null = null;
     if (baselineId) {
       const { diffRuns, summarizeDiffs } = await import('./diff/run.js');
-      console.log(`  diffing against baseline ${baselineId}`);
+      log(`  diffing against baseline ${baselineId}`);
       const result = await diffRuns(backends.data, origin, captures, baselineCaptures, {
         breakpoints: config.breakpoints,
         threshold: config.diffThreshold,
-        onProgress: (m) => console.log(m),
+        reporter,
       });
       diffs = result.diffs;
       await backends.data.putJson(keys.diffs, diffs);
 
       const sum = summarizeDiffs(diffs);
-      console.log(
+      log(
         `  diff: ${sum.flagged} flagged, ${sum.unchanged} unchanged, ` +
           `${sum.newPages} new, ${sum.errors} error(s)`,
       );
-      console.log(
+      log(
         `  diff work: ${result.stats.byHash} settled by hash, ${result.stats.newPages} new ` +
           `(no transfer for either), ${result.stats.compared} compared ` +
           `(${mb(result.stats.bytesFetched)} fetched)`,
@@ -366,8 +412,8 @@ program
       const toRecheck = [...flagged].sort((a, b) => worstRatio(a) - worstRatio(b)).slice(0, RECHECK_CAP);
 
       if (toRecheck.length) {
-        console.log('');
-        console.log(
+        log('');
+        log(
           `  re-checking ${toRecheck.length} flagged page(s) serially to rule out capture races` +
             (toRecheck.length < flagged.length
               ? ` (the least-changed of ${flagged.length}; the rest changed too much to be noise)`
@@ -386,7 +432,8 @@ program
           mask: sc.mask ?? [],
           hide: sc.hide ?? [],
           blockUrls: sc.blockUrls ?? [],
-          onProgress: () => {},
+          phaseLabel: 're-check',
+          reporter,
         });
 
         const rechecked = await rerunDiff(
@@ -397,7 +444,7 @@ program
           {
             breakpoints: config.breakpoints,
             threshold: config.diffThreshold,
-            onProgress: () => {},
+            reporter,
           },
         );
 
@@ -417,7 +464,7 @@ program
         await backends.data.putJson(keys.captures, captures);
 
         const still = diffs.filter((d) => d.flagged).length;
-        console.log(
+        log(
           `  after re-check: ${still} still flagged ` +
             `(${flagged.length - still} of the ${toRecheck.length} re-shot were capture noise, ` +
             `not real change)`,
@@ -435,15 +482,15 @@ program
       if (e.tier === 'C' && !targets.has(e.loc)) targets.set(e.loc, []);
     }
 
-    console.log('');
-    console.log('  checking links');
+    log('');
+    log('  checking links');
     const links = await checkLinks(targets, {
       canonicalOrigin: origin,
       checkExternal: opts.external !== false,
-      onProgress: (m) => console.log(m),
+      reporter,
     });
     await backends.data.putJson(keys.links, links);
-    console.log(
+    log(
       `  links: ${links.checked} checked, ${links.broken} broken, ` +
         `${links.blocked} blocked (bot protection), ${links.redirects} redirects`,
     );
@@ -451,8 +498,8 @@ program
     // --- proofreading -------------------------------------------------------
     let copy: CopyReport | null = null;
     if (wantProofread) {
-      console.log('');
-      console.log('  proofreading copy');
+      log('');
+      log('  proofreading copy');
       copy = await runProofread(backends, origin, captures, config, sc);
       await backends.data.putJson(keys.copy, copy);
     }
@@ -477,22 +524,26 @@ program
 
     const baselineResult = await setBaseline(backends.data, origin, runId);
     if (!baselineResult.ok) {
-      console.log(
+      log(
         `\n  WARNING: another scan moved the baseline to ${baselineResult.conflictedWith ?? 'an unknown run'} ` +
           `while this one was running. This run's data is stored, but it is NOT the baseline.`,
       );
     }
 
-    const pruned = await pruneRuns(backends.data, origin, config.retainRuns, runId);
-    if (pruned.removedRuns.length || pruned.removedBlobs) {
-      console.log(
-        `  pruned ${pruned.removedRuns.length} old run(s), ` +
-          `collected ${pruned.removedBlobs} unreferenced blob(s) (${mb(pruned.bytesFreed)})`,
-      );
-    }
+    log('');
+    reportPrune(
+      await pruneRuns(backends.data, origin, {
+        keep: config.retainRuns,
+        maxAgeMs: config.retainDays * DAY_MS,
+        protectRunId: runId,
+        reports: backends.reports,
+      }),
+      config,
+    );
 
-    console.log(`  view:      npm run serve -- ${site} ${runId}`);
-    console.log('');
+    log(`  view:      npm run serve -- ${site} ${runId}`);
+    log(`  total time: ${reporter.elapsed()}`);
+    log('');
   });
 
 program
@@ -515,24 +566,24 @@ program
     );
 
     const threshold = opts.threshold ?? config.diffThreshold;
-    console.log(`\n  ${opts.current} vs ${opts.baseline}  (threshold ${threshold})\n`);
+    log(`\n  ${opts.current} vs ${opts.baseline}  (threshold ${threshold})\n`);
 
     const result = await diffRuns(backends.data, origin, captures, baselineCaptures, {
       breakpoints: config.breakpoints,
       threshold,
-      onProgress: (m) => console.log(m),
+      reporter,
     });
     await backends.data.putJson(cur.diffs, result.diffs);
 
     const sum = summarizeDiffs(result.diffs);
-    console.log(`\n  ${sum.flagged} flagged, ${sum.unchanged} unchanged, ${sum.newPages} new, ${sum.errors} error(s)\n`);
+    log(`\n  ${sum.flagged} flagged, ${sum.unchanged} unchanged, ${sum.newPages} new, ${sum.errors} error(s)\n`);
 
     for (const d of result.diffs.slice(0, 12)) {
       const parts = Object.entries(d.breakpoints).map(
         ([bp, r]) => `${bp}=${(r.ratio * 100).toFixed(3)}%${r.heightDelta ? ` (h${r.heightDelta > 0 ? '+' : ''}${r.heightDelta})` : ''}`,
       );
-      console.log(`  ${d.flagged ? 'FLAG' : '    '} ${d.loc}`);
-      console.log(`         ${parts.join('  ')}`);
+      log(`  ${d.flagged ? 'FLAG' : '    '} ${d.loc}`);
+      log(`         ${parts.join('  ')}`);
     }
   });
 
@@ -548,7 +599,7 @@ program
     const { serveRun } = await import('./report/serve.js');
     const id = await resolveRunId(backends, origin, runId);
     const url = await serveRun(backends.data, origin, id, opts.port);
-    console.log(`\n  ${url}\n\n  Ctrl+C to stop.\n`);
+    log(`\n  ${url}\n\n  Ctrl+C to stop.\n`);
   });
 
 program
@@ -582,7 +633,7 @@ program
       origin,
       keys.report,
     );
-    console.log('');
+    log('');
   });
 
 program
@@ -612,14 +663,14 @@ program
       if (e.tier === 'C' && !targets.has(e.loc)) targets.set(e.loc, []);
     }
 
-    console.log(`\n  re-checking links for ${id}`);
+    log(`\n  re-checking links for ${id}`);
     const links = await checkLinks(targets, {
       canonicalOrigin: inventory.canonicalOrigin,
       checkExternal: opts.external !== false,
-      onProgress: (m) => console.log(m),
+      reporter,
     });
     await backends.data.putJson(keys.links, links);
-    console.log(
+    log(
       `  links: ${links.checked} checked, ${links.broken} broken, ` +
         `${links.blocked} blocked, ${links.redirects} redirects`,
     );
@@ -640,7 +691,7 @@ program
       origin,
       keys.report,
     );
-    console.log('');
+    log('');
   });
 
 program
@@ -669,7 +720,7 @@ program
 
     if (opts.languageTool === false) config.proofread.languageTool = false;
 
-    console.log(`\n  proofreading ${id}`);
+    log(`\n  proofreading ${id}`);
     const sc = siteConfig(config, origin);
     const copy = await runProofread(backends, origin, captures, config, sc);
     if (copy) await backends.data.putJson(keys.copy, copy);
@@ -691,7 +742,7 @@ program
       origin,
       keys.report,
     );
-    console.log('');
+    log('');
   });
 
 program
@@ -706,7 +757,7 @@ program
     const current = (await backends.data.getJson<{ ids: string[] }>(key))?.ids ?? [];
     const merged = [...new Set([...current, ...ids])];
     await backends.data.putJson(key, { ids: merged, updatedAt: new Date().toISOString() });
-    console.log(`\n  dismissed ${ids.length} finding(s); ${merged.length} total for ${origin}\n`);
+    log(`\n  dismissed ${ids.length} finding(s); ${merged.length} total for ${origin}\n`);
   });
 
 program
@@ -726,7 +777,7 @@ program
     const { migrateLocalRuns } = await import('./store/migrate.js');
     const result = await migrateLocalRuns(config, backends, origin, {
       all: Boolean(opts.all),
-      onProgress: (m) => console.log(m),
+      reporter,
     });
 
     // Build reports for what was just moved.
@@ -741,7 +792,7 @@ program
       if (!inventory) continue;
 
       const manifest = await backends.data.getJson<{ baselineId?: string | null }>(keys.manifest);
-      console.log(`\n  building reports for ${runId}`);
+      log(`\n  building reports for ${runId}`);
       await writeReports(
         {
           inventory,
@@ -759,7 +810,36 @@ program
         keys.report,
       );
     }
-    console.log('');
+    log('');
+  });
+
+program
+  .command('prune')
+  .description('apply the retention and expiry rules without running a scan')
+  .argument('<site>', 'site URL')
+  .option('--keep <n>', 'override retainRuns for this invocation', (v) => parseInt(v, 10))
+  .option('--max-age-days <n>', 'override retainDays for this invocation', (v) => parseInt(v, 10))
+  .option('--dry-run', 'report what would go without removing anything')
+  .option('--config <path>', 'config file', 'scanner.config.json')
+  .action(async (site: string, opts) => {
+    const { config, backends, origin } = await context(site, opts.config);
+    const keep = opts.keep ?? config.retainRuns;
+    const days = opts.maxAgeDays ?? config.retainDays;
+
+    log(`\n  ${backends.data.describe}`);
+    log(`  ${origin}: keep ${keep} run(s), expire after ${days} day(s)`);
+    log('');
+
+    reportPrune(
+      await pruneRuns(backends.data, origin, {
+        keep,
+        maxAgeMs: days * DAY_MS,
+        reports: backends.reports,
+        dryRun: Boolean(opts.dryRun),
+      }),
+      { ...config, retainRuns: keep, retainDays: days },
+    );
+    log('');
   });
 
 program
@@ -767,17 +847,40 @@ program
   .argument('<site>', 'site URL')
   .option('--config <path>', 'config file', 'scanner.config.json')
   .action(async (site: string, opts) => {
-    const { backends, origin } = await context(site, opts.config);
+    const { config, backends, origin } = await context(site, opts.config);
     const runs = await listRuns(backends.data, origin);
     const baseline = await getBaseline(backends.data, origin);
 
-    console.log(`\n  ${backends.data.describe}`);
+    log(`\n  ${backends.data.describe}`);
     if (!runs.length) {
-      console.log(`  no runs for ${origin}\n`);
+      log(`  no runs for ${origin}\n`);
       return;
     }
-    for (const r of runs) console.log(`  ${r === baseline ? '*' : ' '} ${r}`);
-    console.log('');
+
+    // Age and fate alongside each run: the lifecycle rules delete things
+    // unattended, so what is about to go should be visible before it goes.
+    const now = Date.now();
+    for (const [i, r] of runs.entries()) {
+      const startedAt = runStartedAt(r);
+      const ageDays = startedAt ? Math.floor((now - startedAt.getTime()) / DAY_MS) : null;
+      const expired = ageDays !== null && ageDays > config.retainDays;
+      const beyondKeep = i >= config.retainRuns;
+
+      const fate =
+        r === baseline
+          ? 'baseline - never pruned'
+          : expired
+            ? `EXPIRES next run (over ${config.retainDays} days)`
+            : beyondKeep
+              ? 'PRUNES next run (beyond retention)'
+              : '';
+
+      log(
+        `  ${r === baseline ? '*' : ' '} ${r}  ` +
+          `${rpad(ageDays === null ? '?' : `${ageDays}d`, 6)}  ${fate}`,
+      );
+    }
+    log('');
   });
 
 program
@@ -787,10 +890,10 @@ program
   .action(async (opts) => {
     const config = await loadConfig(opts.config);
     const backends = await createBackends(config);
-    console.log(`\n  data:    ${backends.data.describe}`);
-    console.log(`  reports: ${backends.reports.describe}`);
-    console.log(`  central: ${backends.central ? 'yes' : 'no - runs stay on this machine'}`);
-    console.log(`  bucket:  ${resolveBucket(config) ?? '(none configured)'}\n`);
+    log(`\n  data:    ${backends.data.describe}`);
+    log(`  reports: ${backends.reports.describe}`);
+    log(`  central: ${backends.central ? 'yes' : 'no - runs stay on this machine'}`);
+    log(`  bucket:  ${resolveBucket(config) ?? '(none configured)'}\n`);
   });
 
 program.parseAsync(process.argv).catch((err) => {

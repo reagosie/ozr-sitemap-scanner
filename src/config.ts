@@ -118,6 +118,19 @@ export const ConfigSchema = z.object({
   diffThreshold: z.number().positive().default(0.001),
   /** Runs retained per host before the oldest are pruned. */
   retainRuns: z.number().int().positive().default(5),
+  /**
+   * Runs older than this are removed even if fewer than `retainRuns` remain.
+   *
+   * The two rules are independent on purpose. Retention alone leaves stale data
+   * forever on a site scanned twice a year -- five runs is two and a half years
+   * of screenshots nobody will ever open again. Age alone would let a busy site
+   * accumulate without limit inside the window.
+   *
+   * Enforced by the scanner itself rather than by an S3 lifecycle rule, so the
+   * policy is versioned with the code, applies to whatever bucket the tool is
+   * pointed at, and works identically on the local backend.
+   */
+  retainDays: z.number().int().positive().default(365),
   sites: z.record(SiteConfigSchema).default({}),
 });
 

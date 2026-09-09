@@ -21,6 +21,23 @@ export const RUN_ID_RE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$/;
 /** Reserved child names under a host prefix that are not runs. */
 const NON_RUN_PREFIXES = new Set(['blobs']);
 
+/**
+ * The instant a run started, recovered from its id.
+ *
+ * The id IS the timestamp, so age costs no request and no stored field -- which
+ * matters for expiry, because reading a manifest for every run of every host
+ * would turn a cheap listing into a round trip per run.
+ */
+export function runStartedAt(runId: string): Date | null {
+  if (!RUN_ID_RE.test(runId)) return null;
+  const iso = runId.replace(
+    /^(\d{4}-\d{2}-\d{2}T\d{2})-(\d{2})-(\d{2})-(\d{3})Z$/,
+    '$1:$2:$3.$4Z',
+  );
+  const ms = Date.parse(iso);
+  return Number.isNaN(ms) ? null : new Date(ms);
+}
+
 /** Storage-safe host segment. */
 export function hostDir(origin: string): string {
   let host: string;
@@ -126,41 +143,118 @@ export async function setBaseline(
  */
 const BLOB_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
 
+export interface PruneOptions {
+  /** Runs retained per host, newest first. */
+  keep: number;
+  /**
+   * Runs older than this go regardless of the keep count.
+   *
+   * Omit to disable age expiry entirely. Age comes from the run id, so a run
+   * whose id predates the current format is never expired -- unparseable is
+   * treated as "leave it alone", never as "infinitely old".
+   */
+  maxAgeMs?: number;
+  /** The run in progress. Never removed, whatever the other rules say. */
+  protectRunId?: string;
+  /**
+   * Reports backend, so a run's emailable files go with the run.
+   *
+   * The reports prefix was originally meant to outlive the data. That is the
+   * wrong default for a store nobody is watching: nothing would ever have
+   * removed those files, and "5 runs per site" has to mean five runs' worth of
+   * everything, or the bucket grows without limit in a place nobody looks.
+   */
+  reports?: StorageBackend;
+  /** List what would go without removing any of it. */
+  dryRun?: boolean;
+}
+
 export interface PruneResult {
+  /** Removed for falling outside the retention count. */
   removedRuns: string[];
+  /** Removed for being older than `maxAgeMs`. */
+  expiredRuns: string[];
   removedBlobs: number;
+  /** Everything freed: run metadata, reports, and collected blobs. */
   bytesFreed: number;
+  /**
+   * A run that met a removal rule but was kept because it is the baseline.
+   *
+   * Deleting the baseline is the single most expensive mistake available here:
+   * the next scan would find no comparison point, call all ~525 pages new, and
+   * hand back a report with no change signal at all.
+   */
+  keptBaseline?: string;
+  dryRun: boolean;
 }
 
 /**
- * Drop runs beyond the retention limit, then collect blobs nothing references.
+ * Enforce retention, then collect blobs nothing references.
+ *
+ * This is the whole lifecycle policy: it lives in the program rather than in an
+ * S3 lifecycle rule so that the rules travel with the code and apply to any
+ * bucket the tool is pointed at, including a local `runs/` directory that AWS
+ * could never manage.
  *
  * Content addressing means deleting a run's metadata does not free its images --
  * they may still belong to a surviving run. So pruning is two phases: remove the
- * run prefixes, then diff the set of blobs on disk against the set referenced by
- * everything that is left.
+ * doomed runs, then diff the blobs in the store against the set still referenced
+ * by everything left standing.
+ *
+ * Note what age expiry deliberately does NOT do: it never deletes a blob for
+ * being old. A screenshot uploaded two years ago is still the current image of
+ * any page that has not changed since, and deleting it by date would corrupt
+ * every surviving run that points at it. Blobs leave only by becoming
+ * unreferenced.
  */
 export async function pruneRuns(
   backend: StorageBackend,
   origin: string,
-  keep: number,
-  protectRunId?: string,
+  opts: PruneOptions,
 ): Promise<PruneResult> {
+  const { keep, maxAgeMs, protectRunId, reports, dryRun = false } = opts;
+
   const runs = await listRuns(backend, origin);
   const baseline = await getBaseline(backend, origin);
+  const now = Date.now();
 
   const removedRuns: string[] = [];
-  for (const r of runs.slice(keep)) {
-    if (r === baseline || r === protectRunId) continue;
-    const objects = await backend.listObjects(runKeys(origin, r).root);
-    await backend.remove(objects.map((o) => o.key));
-    removedRuns.push(r);
+  const expiredRuns: string[] = [];
+  let keptBaseline: string | undefined;
+  let bytesFreed = 0;
+
+  for (const [index, runId] of runs.entries()) {
+    const startedAt = runStartedAt(runId);
+    const tooOld =
+      maxAgeMs !== undefined && startedAt !== null && now - startedAt.getTime() > maxAgeMs;
+    const beyondKeep = index >= keep;
+    if (!tooOld && !beyondKeep) continue;
+
+    if (runId === protectRunId) continue;
+    if (runId === baseline) {
+      keptBaseline = runId;
+      continue;
+    }
+    (tooOld ? expiredRuns : removedRuns).push(runId);
+  }
+
+  for (const runId of [...removedRuns, ...expiredRuns]) {
+    const objects = await backend.listObjects(runKeys(origin, runId).root);
+    bytesFreed += objects.reduce((n, o) => n + o.size, 0);
+    if (!dryRun) await backend.remove(objects.map((o) => o.key));
+
+    if (reports) {
+      const published = await reports.listObjects(joinKey(hostDir(origin), runId));
+      bytesFreed += published.reduce((n, o) => n + o.size, 0);
+      if (!dryRun) await reports.remove(published.map((o) => o.key));
+    }
   }
 
   // Screenshots are referenced from captures.json and diff overlays from
   // diffs.json, so both have to be read -- collecting only one would delete
   // every overlay the surviving reports still link to.
-  const survivors = runs.filter((r) => !removedRuns.includes(r));
+  const doomed = new Set([...removedRuns, ...expiredRuns]);
+  const survivors = runs.filter((r) => !doomed.has(r));
   const referenced = new Set<string>();
   for (const r of survivors) {
     const keys = runKeys(origin, r);
@@ -180,19 +274,23 @@ export async function pruneRuns(
     }
   }
 
-  const cutoff = Date.now() - BLOB_GRACE_MS;
+  const cutoff = now - BLOB_GRACE_MS;
   const blobs = await backend.listObjects(joinKey(hostDir(origin), 'blobs'));
-  const doomed = blobs.filter((b) => {
+  const orphans = blobs.filter((b) => {
     const sha = b.key.split('/').pop()?.replace(/\.png$/, '') ?? '';
     return !referenced.has(sha) && b.lastModified.getTime() < cutoff;
   });
 
-  if (doomed.length) await backend.remove(doomed.map((b) => b.key));
+  if (orphans.length && !dryRun) await backend.remove(orphans.map((b) => b.key));
+  bytesFreed += orphans.reduce((n, b) => n + b.size, 0);
 
   return {
     removedRuns,
-    removedBlobs: doomed.length,
-    bytesFreed: doomed.reduce((n, b) => n + b.size, 0),
+    expiredRuns,
+    removedBlobs: orphans.length,
+    bytesFreed,
+    ...(keptBaseline ? { keptBaseline } : {}),
+    dryRun,
   };
 }
 

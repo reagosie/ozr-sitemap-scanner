@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { excerptAround, findingId, type Corpus, type CorpusBlock } from './extract.js';
 import type { Confidence, CopyFinding } from './types.js';
+import { silentReporter, type Reporter } from '../progress.js';
 
 const CONTAINER = 'sitemap-scanner-languagetool';
 const IMAGE = 'erikvl87/languagetool';
@@ -47,7 +48,7 @@ export interface LanguageToolOptions {
   port: number;
   /** Start the container if nothing is listening. */
   autoStart: boolean;
-  onProgress?: (msg: string) => void;
+  reporter?: Reporter;
 }
 
 export interface LanguageToolOutcome {
@@ -95,7 +96,7 @@ function run(cmd: string, args: string[], timeoutMs: number): Promise<{ code: nu
  * in the report rather than taking the run down with it.
  */
 export async function ensureLanguageTool(opts: LanguageToolOptions): Promise<string | null> {
-  const { port, autoStart, onProgress = () => {} } = opts;
+  const { port, autoStart, reporter = silentReporter } = opts;
 
   if (await ping(port)) return null;
   if (!autoStart) return `nothing listening on port ${port} and auto-start is disabled`;
@@ -103,7 +104,7 @@ export async function ensureLanguageTool(opts: LanguageToolOptions): Promise<str
   const version = await run('docker', ['--version'], 10_000);
   if (version.code !== 0) return 'Docker is not available on this machine';
 
-  onProgress(`    starting LanguageTool (${IMAGE}); the first run pulls ~1 GB`);
+  reporter.log(`    starting LanguageTool (${IMAGE}); the first run pulls ~1 GB`);
   await run('docker', ['rm', '-f', CONTAINER], 15_000);
 
   const started = await run(
@@ -119,7 +120,7 @@ export async function ensureLanguageTool(opts: LanguageToolOptions): Promise<str
   // Java service: the container exists well before the API answers.
   for (let i = 0; i < 60; i++) {
     if (await ping(port)) {
-      onProgress('    LanguageTool ready');
+      reporter.log('    LanguageTool ready');
       return null;
     }
     await new Promise((r) => setTimeout(r, 2_000));
@@ -184,14 +185,14 @@ export async function checkGrammar(
   corpus: Corpus,
   opts: LanguageToolOptions,
 ): Promise<LanguageToolOutcome> {
-  const { port, onProgress = () => {} } = opts;
+  const { port, reporter = silentReporter } = opts;
 
   const skipped = await ensureLanguageTool(opts);
   if (skipped) return { findings: [], skipped };
 
   const chunks = buildChunks(corpus.blocks);
   const byKey = new Map<string, CopyFinding>();
-  let done = 0;
+  reporter.phase('grammar', chunks.length);
 
   for (const chunk of chunks) {
     let matches: LtMatch[];
@@ -250,9 +251,9 @@ export async function checkGrammar(
       });
     }
 
-    done++;
-    if (done % 50 === 0 || done === chunks.length) onProgress(`    grammar ${done}/${chunks.length}`);
+    reporter.tick();
   }
+  reporter.endPhase();
 
   return { findings: [...byKey.values()] };
 }
