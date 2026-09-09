@@ -308,8 +308,9 @@ program
           `${sum.newPages} new, ${sum.errors} error(s)`,
       );
       console.log(
-        `  diff work: ${result.stats.byHash} settled by hash (no transfer), ` +
-          `${result.stats.compared} compared (${mb(result.stats.bytesFetched)} fetched)`,
+        `  diff work: ${result.stats.byHash} settled by hash, ${result.stats.newPages} new ` +
+          `(no transfer for either), ${result.stats.compared} compared ` +
+          `(${mb(result.stats.bytesFetched)} fetched)`,
       );
     }
 

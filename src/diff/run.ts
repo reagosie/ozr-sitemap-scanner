@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import pLimit from 'p-limit';
-import { compareShots, unchangedByHash, type DiffResult } from './compare.js';
+import { compareShots, newByHeight, unchangedByHash, type DiffResult } from './compare.js';
 import { blobKey } from '../store/runs.js';
 import type { StorageBackend } from '../store/backend.js';
 import type { BreakpointSpec } from '../capture/browser.js';
@@ -20,8 +20,10 @@ export interface PageDiff {
 }
 
 export interface DiffStats {
-  /** Pairs settled by comparing hashes -- no bytes moved. */
+  /** Unchanged, proven by equal content hashes -- no bytes moved. */
   byHash: number;
+  /** New, because the baseline had no image -- also no bytes moved. */
+  newPages: number;
   /** Pairs that needed both images fetched and decoded. */
   compared: number;
   bytesFetched: number;
@@ -49,7 +51,7 @@ export async function diffRuns(
   const { breakpoints, threshold, concurrency = 4, onProgress = () => {} } = opts;
   const limiter = pLimit(concurrency);
   const out: PageDiff[] = [];
-  const stats: DiffStats = { byHash: 0, compared: 0, bytesFetched: 0 };
+  const stats: DiffStats = { byHash: 0, newPages: 0, compared: 0, bytesFetched: 0 };
   let done = 0;
 
   const baseByLoc = new Map((baselineCaptures ?? []).map((c) => [c.loc, c]));
@@ -74,16 +76,25 @@ export async function diffRuns(
             continue;
           }
 
+          // Nothing to compare against: the page is NEW, and that verdict needs
+          // no pixels. Skipping the fetch here matters most when a baseline's
+          // captures.json is missing or half-written -- a partially completed
+          // migration, say -- where the alternative is pulling back every
+          // screenshot this run just uploaded.
+          if (!baseShot?.sha256) {
+            diffs[bp.name] = newByHeight(shot.height).result;
+            stats.newPages++;
+            continue;
+          }
+
           const current = shot.sha256 ? await backend.getBuffer(blobKey(origin, shot.sha256)) : null;
-          const baseline = baseShot?.sha256
-            ? await backend.getBuffer(blobKey(origin, baseShot.sha256))
-            : null;
+          const baseline = await backend.getBuffer(blobKey(origin, baseShot.sha256));
 
           stats.bytesFetched += (current?.length ?? 0) + (baseline?.length ?? 0);
           stats.compared++;
 
           const outcome = compareShots(baseline, current, threshold);
-          if (baseShot?.sha256) outcome.result.baselineSha256 = baseShot.sha256;
+          outcome.result.baselineSha256 = baseShot.sha256;
 
           if (outcome.diffBuffer) {
             const sha = createHash('sha256').update(outcome.diffBuffer).digest('hex');

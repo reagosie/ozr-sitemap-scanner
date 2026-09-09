@@ -70,6 +70,29 @@ export function unchangedByHash(height: number, sha256: string): CompareOutcome 
 }
 
 /**
+ * Result for a page the baseline has no image for.
+ *
+ * Deciding this needs no pixels -- only the knowledge that there is nothing to
+ * compare against. Fetching the current image to reach the same conclusion would
+ * mean downloading screenshots this run just uploaded, which on a run whose
+ * baseline metadata is missing is the entire capture set: 4.4 GB to learn that
+ * every page is new.
+ */
+export function newByHeight(height: number): CompareOutcome {
+  return {
+    result: {
+      status: 'new',
+      changedPixels: 0,
+      totalPixels: 0,
+      ratio: 0,
+      baselineHeight: 0,
+      currentHeight: height,
+      heightDelta: height,
+    },
+  };
+}
+
+/**
  * Compare one screenshot against its baseline.
  *
  * Full-page screenshots routinely differ in HEIGHT between runs, and pixelmatch
