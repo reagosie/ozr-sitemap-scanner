@@ -9,6 +9,7 @@ import { blobKey } from '../store/runs.js';
 import type { StorageBackend } from '../store/backend.js';
 import type { Inventory, Tier, UrlEntry } from '../types.js';
 import { silentReporter, type Reporter } from '../progress.js';
+import { mergeAssetVersions, type AssetVersions } from '../assets.js';
 
 export interface ShotResult {
   /** Human-readable download name. Not a storage key. */
@@ -77,6 +78,13 @@ export interface CaptureOptions {
 export interface CaptureRun {
   captures: PageCapture[];
   stats: CaptureStats;
+  /**
+   * Theme and plugin versions for the whole site, merged from every page.
+   *
+   * Site-wide rather than per-page because it is the same everywhere, and
+   * storing it 525 times would bloat captures.json for no benefit.
+   */
+  assetVersions: AssetVersions;
 }
 
 /**
@@ -148,6 +156,7 @@ export async function captureAll(
   );
 
   const stats: CaptureStats = { uploaded: 0, reused: 0, bytesUploaded: 0 };
+  const assetVersions: AssetVersions = {};
   const browser = await launchBrowser();
   const linkUnion = new Map<string, Set<string>>();
   const textUnion = new Map<string, Record<string, string>>();
@@ -201,6 +210,7 @@ export async function captureAll(
             };
 
             if (wantText && result.textBlocks.length) cap.textBlocks = result.textBlocks;
+            mergeAssetVersions(assetVersions, result.assetVersions);
 
             const set = linkUnion.get(entry.loc) ?? new Set<string>();
             for (const l of result.links) set.add(l);
@@ -239,5 +249,5 @@ export async function captureAll(
     if (texts && Object.keys(texts).length) cap.linkTexts = texts;
   }
 
-  return { captures: [...captures.values()], stats };
+  return { captures: [...captures.values()], stats, assetVersions };
 }

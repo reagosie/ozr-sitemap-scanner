@@ -4,6 +4,8 @@ import { joinKey } from '../store/backend.js';
 import type { Backends } from '../store/factory.js';
 import type { ReportInput } from './build.js';
 import { silentReporter, type Reporter } from '../progress.js';
+import { describeAssetChange } from '../assets.js';
+import { findOutliers, worstRatio } from '../diff/run.js';
 
 export interface PublishOptions {
   /** Flagged pages whose screenshots are embedded. Beyond this, links only. */
@@ -183,9 +185,6 @@ interface PageLink {
   url: string;
 }
 
-function worstRatio(d: { breakpoints: Record<string, { status: string; ratio: number }> }): number {
-  return Math.max(0, ...Object.values(d.breakpoints).map((b) => (b.status === 'changed' ? b.ratio : 0)));
-}
 
 /**
  * Downscale and re-encode in the browser we already launched for the PDF.
@@ -334,6 +333,40 @@ function renderHtml(
       .join('')}${
       pages.length > cap ? `<li class="muted">and ${pages.length - cap} more</li>` : ''
     }</ul>`;
+
+  // Code updates go first in the emailable report too. A stakeholder reading
+  // this needs to know a theme changed before they read a list of changed pages,
+  // or the list looks alarming for no reason.
+  const assetChanges = input.assetChanges ?? [];
+  const assetBody = assetChanges.length
+    ? `<div class="item">
+        <div class="meta">These updates landed between the two scans. An update can change how
+        every page looks at once, which explains a large number of changed pages below.
+        It is not a reason to skip checking them &mdash; the thing worth finding is a page
+        the update broke.</div>
+        <ul>${assetChanges.map((c) => `<li><code>${esc(describeAssetChange(c))}</code></li>`).join('')}</ul>
+      </div>`
+    : '';
+
+  const { median: typicalChange, outliers } = input.diffs
+    ? findOutliers(input.diffs)
+    : { median: 0, outliers: [] };
+
+  const outlierBody = outliers.length
+    ? `<div class="item">
+        <div class="meta">Most changed pages moved about
+        ${(typicalChange * 100).toFixed(2)}% of their pixels. These moved far more. If an
+        update broke a layout, it is most likely one of these. Open them first.</div>
+        <ul>${outliers
+          .slice(0, 25)
+          .map(
+            (d) =>
+              `<li><code>${esc(d.loc)}</code> &mdash; ${(worstRatio(d) * 100).toFixed(2)}% changed</li>`,
+          )
+          .join('')}</ul>
+        ${outliers.length > 25 ? `<div class="meta">... and ${outliers.length - 25} more.</div>` : ''}
+      </div>`
+    : '';
 
   const brokenBody = f.broken.length
     ? f.broken
@@ -493,6 +526,8 @@ function renderHtml(
     ${cards.map(([label, n]) => `<div class="card"><div class="n">${esc(n)}</div><div class="l">${esc(label)}</div></div>`).join('')}
   </div>
 
+  ${section("The site's code changed", assetBody, '')}
+  ${section('Changed much more than the rest', outlierBody, '')}
   ${section('Broken links', brokenBody, 'Each link is listed once, with the pages it appears on and the text it is linked from. A link in the site-wide header or footer will show a large page count.')}
   ${section('Copy issues', copyBody, f.copySkipped.length ? `Not run: ${f.copySkipped.map((s) => `${esc(s.check)} (${esc(s.reason)})`).join('; ')}` : '')}
   ${section('Discovery', discoveryBody)}

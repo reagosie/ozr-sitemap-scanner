@@ -270,6 +270,48 @@ noise. Guarding that:
 Re-running `scan --limit 20` twice against an unchanged site is the regression
 test for all of this; the flagged count should be at or near zero.
 
+## Why a page changed
+
+The diff tells you a page changed. It cannot tell you why. WordPress puts a
+version number on every stylesheet and script it loads, so the scanner reads the
+active theme and plugin versions straight off the public page — no login, no
+server access — and stores them with each run as `assets.json`.
+
+Comparing two runs then answers the question the diff cannot:
+
+```
+THEME/PLUGIN CHANGES since the baseline (3):
+  wordpress 6.5 -> 6.6
+  themes/ozr 7.0.4 -> 7.1
+  plugins/the-events-calendar 6.17.2 -> 6.17.4
+```
+
+A theme update changes hundreds of pages at once. Without this the reviewer sees
+a mass of flagged pages and no reason for any of them.
+
+**This never causes a page to be skipped.** A theme update that quietly breaks
+one page's layout is the exact failure this tool exists to catch, and it happens
+on pages nobody edited, so nobody has any reason to go and look. Every page is
+still captured and compared.
+
+What it adds instead is one new warning. Most pages move by a similar small
+amount when an update lands; a page whose layout actually broke moves far more.
+So the report also lists the pages that changed much more than the rest:
+
+```
+4 page(s) changed FAR more than the rest (typical change 2.10%). Look at these first:
+     34.20%  https://example.com/schedule/
+```
+
+Two details that matter in practice:
+
+- The version numbers are not always the component's real version. Elementor
+  ships files carrying six different numbers. That is fine: the question is only
+  whether the set *moved*, which is what says the code was replaced.
+- Some plugins use a timestamp instead of a version. Those change every time the
+  site rebuilds its cached files, so they are ignored — otherwise they would
+  raise a false alarm on nearly every scan.
+
 ## Retention
 
 The scanner enforces its own lifecycle. There is **no S3 lifecycle policy to

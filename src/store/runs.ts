@@ -57,6 +57,8 @@ export interface RunKeys {
   captures: string;
   diffs: string;
   copy: string;
+  /** Theme and plugin versions the site was running during this run. */
+  assets: string;
   report: string;
 }
 
@@ -70,6 +72,7 @@ export function runKeys(origin: string, runId: string): RunKeys {
     captures: joinKey(root, 'captures.json'),
     diffs: joinKey(root, 'diffs.json'),
     copy: joinKey(root, 'copy.json'),
+    assets: joinKey(root, 'assets.json'),
     report: joinKey(root, 'report.html'),
   };
 }

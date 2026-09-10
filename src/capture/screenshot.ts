@@ -1,4 +1,5 @@
 import type { BrowserContext } from 'playwright';
+import { collectAssetVersions, type AssetVersions } from '../assets.js';
 
 /**
  * Neutralize motion without erasing layout.
@@ -38,6 +39,8 @@ export interface CaptureResult {
   links: string[];
   /** Anchor text per href, for locating a broken link on the page. */
   linkTexts: Record<string, string>;
+  /** Theme and plugin versions read off this page's stylesheets and scripts. */
+  assetVersions: AssetVersions;
   /** Empty unless `extractText` was requested. */
   textBlocks: TextBlock[];
   /** The PNG itself. Absent when the capture failed. */
@@ -271,6 +274,15 @@ export async function capturePage(
         }))
         .filter((a) => a.href),
     );
+    // Theme and plugin versions, read from the version number WordPress puts on
+    // every stylesheet and script it loads. Collected here because the page is
+    // already open; see assets.ts for what it is for.
+    const assetUrls = await page.evaluate(() => [
+      ...Array.from(document.querySelectorAll('link[href]')).map((el) => (el as HTMLLinkElement).href),
+      ...Array.from(document.querySelectorAll('script[src]')).map((el) => (el as HTMLScriptElement).src),
+    ]);
+    const assetVersions = collectAssetVersions(assetUrls);
+
     const links = anchors.map((a) => a.href);
     const linkTexts: Record<string, string> = {};
     for (const a of anchors) {
@@ -353,6 +365,7 @@ export async function capturePage(
       height,
       links,
       linkTexts,
+      assetVersions,
       textBlocks,
       buffer,
     };
@@ -365,6 +378,7 @@ export async function capturePage(
       height: 0,
       links: [],
       linkTexts: {},
+      assetVersions: {},
       textBlocks: [],
       error: err instanceof Error ? err.message : String(err),
     };

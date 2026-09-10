@@ -161,3 +161,49 @@ export function summarizeDiffs(diffs: PageDiff[]): DiffSummary {
 
   return { compared: diffs.length, flagged, unchanged, newPages, errors };
 }
+
+/** The largest changed-pixel fraction across a page's breakpoints. */
+export function worstRatio(d: PageDiff): number {
+  return Math.max(0, ...Object.values(d.breakpoints).map((b) => (b.status === 'changed' ? b.ratio : 0)));
+}
+
+export interface OutlierReport {
+  /** Typical change across the flagged pages. */
+  median: number;
+  /** Pages that changed far more than that. */
+  outliers: PageDiff[];
+}
+
+/**
+ * Find the pages that changed much more than the rest.
+ *
+ * When a theme or plugin update lands, it usually shifts every page by a similar
+ * small amount -- a font swap might move 2% of the pixels on all 500 pages. A
+ * page where the update actually BROKE the layout moves far more than that.
+ *
+ * Comparing each flagged page against the typical change makes that page stand
+ * out, which is a warning the tool cannot produce by looking at any page on its
+ * own. It is the answer to "the theme changed, so which pages did it damage?"
+ *
+ * This narrows nothing. Every flagged page is still reported and still needs
+ * looking at. This only says which ones to open first.
+ */
+export function findOutliers(diffs: PageDiff[], minGroup = 10): OutlierReport {
+  const flagged = diffs.filter((d) => d.flagged);
+  if (flagged.length < minGroup) return { median: 0, outliers: [] };
+
+  const ratios = flagged.map(worstRatio).sort((a, b) => a - b);
+  const mid = Math.floor(ratios.length / 2);
+  const median =
+    ratios.length % 2 ? ratios[mid]! : ((ratios[mid - 1]! + ratios[mid]!) / 2);
+
+  // Three times the typical change, and at least five percentage points above
+  // it. The absolute floor matters: when the typical change is 0.1% of pixels,
+  // three times that is still far too small to mean anything.
+  const threshold = Math.max(median * 3, median + 0.05);
+
+  return {
+    median,
+    outliers: flagged.filter((d) => worstRatio(d) > threshold).sort((a, b) => worstRatio(b) - worstRatio(a)),
+  };
+}

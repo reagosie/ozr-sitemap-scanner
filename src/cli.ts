@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
 import { reporter } from './progress.js';
+import {
+  diffAssetVersions,
+  describeAssetChange,
+  type AssetChange,
+  type AssetVersions,
+} from './assets.js';
 import { loadConfig, siteConfig, type Config } from './config.js';
 import { discover } from './discover/reconcile.js';
 import { isCaptured } from './discover/classify.js';
@@ -16,7 +22,7 @@ import {
   acceptedKey,
 } from './store/runs.js';
 import type { PageCapture } from './capture/run.js';
-import type { PageDiff } from './diff/run.js';
+import { worstRatio as worstDiffRatio, type PageDiff } from './diff/run.js';
 import type { LinkCheckReport } from './crawl/links.js';
 import type { CopyReport } from './copy/types.js';
 import type { Inventory } from './types.js';
@@ -341,6 +347,7 @@ program
     let captures = run.captures;
 
     await backends.data.putJson(keys.captures, captures);
+    await backends.data.putJson(keys.assets, run.assetVersions);
 
     const shots = captures.length * config.breakpoints.length;
     const failed = captures.filter((c) => Object.values(c.breakpoints).some((b) => !b.ok && !b.blocked)).length;
@@ -354,6 +361,29 @@ program
     );
     if (failed) log(`  ${failed} URL(s) failed to capture`);
     if (blocked) log(`  ${blocked} URL(s) blocked by bot protection (not counted as broken)`);
+
+    // What changed in the site's own code since the baseline.
+    //
+    // Printed before the diff numbers because it explains them: a theme update
+    // moves every page at once, and without this the reviewer sees hundreds of
+    // flagged pages and no reason for any of them.
+    let assetChanges: AssetChange[] = [];
+    if (baselineId) {
+      const baselineAssets = await backends.data.getJson<AssetVersions>(
+        runKeys(origin, baselineId).assets,
+      );
+      assetChanges = diffAssetVersions(baselineAssets ?? undefined, run.assetVersions);
+      if (!baselineAssets) {
+        log('  theme/plugin versions: baseline predates version tracking, nothing to compare');
+      } else if (assetChanges.length) {
+        log('');
+        log(`  THEME/PLUGIN CHANGES since the baseline (${assetChanges.length}):`);
+        for (const c of assetChanges) log(`    ${describeAssetChange(c)}`);
+        log('    Pages below may have changed because of this. They still all need checking.');
+      } else {
+        log('  theme/plugin versions: unchanged since the baseline');
+      }
+    }
 
     let diffs: PageDiff[] | null = null;
     if (baselineId) {
@@ -407,9 +437,9 @@ program
       // sitting just over the threshold is where a capture race hides. Sorting
       // by change ratio ascending spends a bounded budget on the only pages
       // whose verdict is actually in doubt.
-      const worstRatio = (d: PageDiff): number =>
-        Math.max(0, ...Object.values(d.breakpoints).map((b) => (b.status === 'changed' ? b.ratio : 0)));
-      const toRecheck = [...flagged].sort((a, b) => worstRatio(a) - worstRatio(b)).slice(0, RECHECK_CAP);
+      const toRecheck = [...flagged]
+        .sort((a, b) => worstDiffRatio(a) - worstDiffRatio(b))
+        .slice(0, RECHECK_CAP);
 
       if (toRecheck.length) {
         log('');
@@ -472,6 +502,30 @@ program
       }
     }
 
+    // Which of the changed pages changed MUCH more than the others.
+    //
+    // When an update lands it shifts most pages by a similar small amount. A
+    // page that moved far more than its neighbours is where the update broke
+    // something -- the failure nobody would go looking for, because nobody
+    // edited that page. This ranks the queue; it does not shorten it.
+    if (diffs) {
+      const { findOutliers } = await import('./diff/run.js');
+      const { median, outliers } = findOutliers(diffs);
+      if (outliers.length) {
+        log('');
+        log(
+          `  ${outliers.length} page(s) changed FAR more than the rest ` +
+            `(typical change ${(median * 100).toFixed(2)}%). Look at these first` +
+            (assetChanges.length ? ', in case the update broke them' : '') +
+            ':',
+        );
+        for (const d of outliers.slice(0, 15)) {
+          log(`    ${(worstDiffRatio(d) * 100).toFixed(2).padStart(6)}%  ${d.loc}`);
+        }
+        if (outliers.length > 15) log(`    ... and ${outliers.length - 15} more, all in the report`);
+      }
+    }
+
     // --- link checking ------------------------------------------------------
     const { collectLinks, collectAnchorTexts, checkLinks } = await import('./crawl/links.js');
     const targets = collectLinks(captures, origin);
@@ -518,6 +572,7 @@ program
         baselineId,
         breakpoints: config.breakpoints,
         threshold: config.diffThreshold,
+        assetChanges,
       },
       backends,
       origin,

@@ -3,6 +3,8 @@ import type { PageDiff } from '../diff/run.js';
 import type { LinkCheckReport } from '../crawl/links.js';
 import type { CopyReport } from '../copy/types.js';
 import type { Inventory } from '../types.js';
+import { describeAssetChange, type AssetChange } from '../assets.js';
+import { findOutliers } from '../diff/run.js';
 
 export interface ReportInput {
   inventory: Inventory;
@@ -14,6 +16,8 @@ export interface ReportInput {
   baselineId: string | null;
   breakpoints: { name: string; width: number }[];
   threshold: number;
+  /** Theme and plugin updates since the baseline. Explains a mass of changes. */
+  assetChanges?: AssetChange[];
 }
 
 /** One row of the reviewer's worklist. */
@@ -122,6 +126,13 @@ export function buildReport(input: ReportInput): string {
       return rank(a.verdict) - rank(b.verdict);
     });
 
+  // Which pages changed far more than the rest. Computed here so both the
+  // interactive report and the emailable one rank the same pages first.
+  const { median: outlierMedian, outliers } = input.diffs
+    ? findOutliers(input.diffs)
+    : { median: 0, outliers: [] };
+  const outlierLocs = outliers.map((d) => d.loc);
+
   const payload = {
     site: inv.canonicalOrigin,
     runId: input.runId,
@@ -130,6 +141,13 @@ export function buildReport(input: ReportInput): string {
     breakpoints: input.breakpoints,
     threshold: input.threshold,
     hasDiffs: Boolean(input.diffs && input.diffs.length),
+    assetChanges: (input.assetChanges ?? []).map((c) => ({
+      component: c.component,
+      kind: c.kind,
+      text: describeAssetChange(c),
+    })),
+    outliers: outlierLocs,
+    typicalChange: outlierMedian,
     rows,
     linkIssues,
     copy: input.copy
@@ -324,6 +342,31 @@ document.getElementById('cards').innerHTML = cards.map(function (c) {
 }).join('');
 
 var alerts = [];
+
+// Theme and plugin updates come FIRST, before any list of changed pages,
+// because they are usually the reason those pages changed. Without this the
+// reviewer sees hundreds of flagged pages and no explanation for any of them.
+if (DATA.assetChanges && DATA.assetChanges.length) {
+  alerts.push('<div class="alert warn"><h3>The site's code changed since the baseline (' +
+    DATA.assetChanges.length + ')</h3><ul>' +
+    DATA.assetChanges.map(function (c) { return '<li class="mono">' + esc(c.text) + '</li>'; }).join('') +
+    '</ul><p class="muted">An update like this can change how every page looks at once. ' +
+    'That explains why many pages are flagged below. It is not a reason to skip them: ' +
+    'the thing worth finding is a page the update broke.</p></div>');
+}
+
+// The pages that changed far more than the rest.
+if (DATA.outliers && DATA.outliers.length) {
+  alerts.push('<div class="alert err"><h3>Changed much more than the rest (' + DATA.outliers.length + ')</h3>' +
+    '<p class="muted">Most changed pages moved about ' + pct(DATA.typicalChange) +
+    ' of their pixels. These moved far more, so if an update broke a layout, it is most likely here. Open these first.</p><ul>' +
+    DATA.outliers.slice(0, 25).map(function (loc) {
+      return '<li><a href="#" onclick="openRow(' + JSON.stringify(loc).replace(/"/g, '&quot;') +
+        ');return false;" class="mono">' + esc(loc) + '</a></li>';
+    }).join('') +
+    (DATA.outliers.length > 25 ? '<li class="muted">... and ' + (DATA.outliers.length - 25) + ' more</li>' : '') +
+    '</ul></div>');
+}
 if (DATA.discoveryErrors.length) {
   alerts.push('<div class="alert err"><h3>Discovery errors - inventory is incomplete</h3><ul>' +
     DATA.discoveryErrors.map(function (e) { return '<li>' + esc(e) + '</li>'; }).join('') + '</ul></div>');
@@ -458,6 +501,23 @@ function linkCell(r) {
   return out.length ? out.join(' ') : '<span class="muted">-</span>';
 }
 
+// Jump to one page's row from a link elsewhere in the report, and open it.
+// Uses the search box rather than its own lookup, so there is one code path
+// that decides which rows exist.
+function openRow(loc) {
+  document.getElementById('q').value = loc;
+  document.getElementById('onlyFlagged').checked = false;
+  render();
+  var first = document.querySelector('tr.row');
+  if (first) {
+    first.onclick();
+    first.scrollIntoView({ block: 'center' });
+  }
+}
+
+var OUTLIERS = {};
+(DATA.outliers || []).forEach(function (loc) { OUTLIERS[loc] = true; });
+
 function render() {
   var q = document.getElementById('q').value.toLowerCase();
   var onlyFlagged = document.getElementById('onlyFlagged').checked;
@@ -478,7 +538,8 @@ function render() {
   document.getElementById('tbody').innerHTML = rows.map(function (r, i) {
     return '<tr class="row" data-i="' + i + '">' +
       '<td><a href="' + esc(r.loc) + '" target="_blank" onclick="event.stopPropagation()">' + esc(r.loc) + '</a>' +
-        (r.discoveredVia === 'rest' ? ' <span class="pill rest">rest</span>' : '') + '</td>' +
+        (r.discoveredVia === 'rest' ? ' <span class="pill rest">rest</span>' : '') +
+        (OUTLIERS[r.loc] ? ' <span class="pill flag" title="Changed far more than other pages in this run">changed a lot</span>' : '') + '</td>' +
       '<td class="mono">' + esc(r.type) + '</td>' +
       '<td>' + r.tier + '</td>' +
       '<td>' + diffCell(r) + '</td>' +
