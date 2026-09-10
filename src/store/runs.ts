@@ -136,6 +136,102 @@ export async function setBaseline(
 }
 
 /**
+ * How long a lock stays valid without being refreshed.
+ *
+ * Short on purpose. A scan that crashes cannot release its lock, so this is how
+ * long the site stays blocked afterwards. The running scan refreshes the lock
+ * every few minutes, so a long scan is never at risk of losing it.
+ */
+const LOCK_TTL_MS = 15 * 60 * 1000;
+
+/** How often a running scan re-stamps its lock. Comfortably inside the TTL. */
+const LOCK_REFRESH_MS = 4 * 60 * 1000;
+
+export interface LockInfo {
+  runId: string;
+  startedAt: string;
+  /** Machine the scan is running on, so the message can name it. */
+  machine: string;
+  pid: number;
+}
+
+export interface LockHandle {
+  release(): Promise<void>;
+}
+
+export interface LockResult {
+  ok: boolean;
+  /** Set when refused: who holds it, and since when. */
+  heldBy?: LockInfo;
+  handle?: LockHandle;
+}
+
+/**
+ * Stop two scans of the SAME site running at once.
+ *
+ * Scoped per host, because that is the only place the conflict exists. Two
+ * scans of different sites share nothing that matters: separate prefixes,
+ * separate baselines, separate reports. Scanning campozark.com and campotx.com
+ * together is fine and is the point of keeping this per-host.
+ *
+ * Two scans of one site are wasteful rather than corrupting -- the baseline
+ * hand-off already refuses to clobber a concurrent run -- but they double the
+ * load on the site, and the loser's work is thrown away. Better to say so up
+ * front than to discover it at the end.
+ *
+ * Advisory: `force` walks past it, because a lock left behind by a killed
+ * process must never be able to block a site permanently.
+ */
+export async function acquireLock(
+  backend: StorageBackend,
+  origin: string,
+  info: LockInfo,
+  opts: { force?: boolean } = {},
+): Promise<LockResult> {
+  const key = lockKey(origin);
+  const existing = await backend.readTagged<LockInfo>(key);
+
+  if (existing && !opts.force) {
+    const age = Date.now() - Date.parse(existing.data.startedAt);
+    // An unparseable timestamp is treated as expired rather than as infinitely
+    // valid: a corrupt lock must not be able to block a site forever.
+    if (Number.isFinite(age) && age < LOCK_TTL_MS) {
+      return { ok: false, heldBy: existing.data };
+    }
+  }
+
+  const written = await backend.putJsonConditional(key, info, existing?.tag ?? null);
+  if (!written) {
+    // Another scan claimed it in the moment between the read and the write.
+    const now = await backend.getJson<LockInfo>(key);
+    return { ok: false, ...(now ? { heldBy: now } : {}) };
+  }
+
+  const timer = setInterval(() => {
+    void (async () => {
+      // Only re-stamp a lock that is still ours. If the TTL lapsed and someone
+      // else took over, stealing it back would put two scans on one site --
+      // exactly what this exists to prevent.
+      const current = await backend.getJson<LockInfo>(key).catch(() => null);
+      if (current?.runId !== info.runId) return;
+      await backend.putJson(key, { ...info, startedAt: new Date().toISOString() }).catch(() => {});
+    })();
+  }, LOCK_REFRESH_MS);
+  timer.unref?.();
+
+  return {
+    ok: true,
+    handle: {
+      release: async () => {
+        clearInterval(timer);
+        const current = await backend.getJson<LockInfo>(key).catch(() => null);
+        if (current?.runId === info.runId) await backend.remove([key]).catch(() => {});
+      },
+    },
+  };
+}
+
+/**
  * A blob must be this old before garbage collection may take it.
  *
  * Blobs are uploaded during the capture pass but only become *referenced* when

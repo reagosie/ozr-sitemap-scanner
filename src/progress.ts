@@ -53,6 +53,9 @@ const PLAIN_INTERVAL_MS = 20_000;
  */
 const PLAIN_FIRST_MS = 5_000;
 
+/** How often the clock checks whether the phase has gone quiet. */
+const STALL_CHECK_MS = 5_000;
+
 export function formatDuration(ms: number): string {
   const total = Math.max(0, Math.round(ms / 1000));
   const h = Math.floor(total / 3600);
@@ -72,6 +75,10 @@ class TerminalReporter implements Reporter {
   private lastEmit = 0;
   /** Width of the live line, so the next paint can erase what it does not cover. */
   private painted = 0;
+  /** Keeps the line moving when nothing is completing. See `phase`. */
+  private ticker: ReturnType<typeof setInterval> | null = null;
+  /** `done` as of the last line printed, so a stall can be named as one. */
+  private lastEmitDone = 0;
 
   constructor(private readonly tty: boolean) {}
 
@@ -99,11 +106,34 @@ class TerminalReporter implements Reporter {
     this.total = Math.max(0, total);
     this.done = 0;
     this.phaseStart = Date.now();
+    this.lastEmitDone = 0;
     this.lastEmit = Date.now() - (PLAIN_INTERVAL_MS - PLAIN_FIRST_MS);
     if (this.tty) {
       this.lastEmit = Date.now();
       this.paint(true);
     }
+
+    // A clock, not just a counter.
+    //
+    // Progress was previously driven only by tick(), so a phase that stalled
+    // went completely silent -- which is the moment you most want to hear from
+    // it. A campozarkfoundation scan sat on 17 of 19 pages for eleven minutes
+    // and printed nothing at all, so there was no way to tell a slow page from
+    // a hung one. This keeps the line alive on a timer and says outright when
+    // nothing has moved.
+    this.ticker = setInterval(() => {
+      if (!this.open) return;
+      if (this.tty) {
+        this.paint(true);
+        return;
+      }
+      if (Date.now() - this.lastEmit < PLAIN_INTERVAL_MS) return;
+      const stalled = this.done === this.lastEmitDone;
+      this.lastEmit = Date.now();
+      this.lastEmitDone = this.done;
+      console.log(this.render() + (stalled ? '   [nothing finished since the last line]' : ''));
+    }, STALL_CHECK_MS);
+    this.ticker.unref?.();
   }
 
   tick(delta = 1): void {
@@ -112,11 +142,16 @@ class TerminalReporter implements Reporter {
     if (this.tty) this.paint(false);
     else if (Date.now() - this.lastEmit >= PLAIN_INTERVAL_MS) {
       this.lastEmit = Date.now();
+      this.lastEmitDone = this.done;
       console.log(this.render());
     }
   }
 
   endPhase(): void {
+    if (this.ticker) {
+      clearInterval(this.ticker);
+      this.ticker = null;
+    }
     if (!this.open) return;
     const took = formatDuration(Date.now() - this.phaseStart);
     this.erase();

@@ -416,26 +416,56 @@ export async function capturePage(
     // at each stop forces the renderer to draw every band. Two frames, not one:
     // the first schedules the paint and the second lets it finish.
     {
-      await page.evaluate(async () => {
-        // decode() is the part that was missing. `complete` only promises the
-        // bytes arrived; decoding to a paintable bitmap can still be pending,
-        // and an undecoded image is drawn as nothing. Awaiting it is the
-        // difference between an image the DOM calls loaded and an image the
-        // renderer can actually put on screen.
-        await Promise.all(
-          Array.from(document.images).map((img) =>
-            img.decode ? img.decode().catch(() => undefined) : undefined,
-          ),
-        );
+      // Every wait in here is raced against a timer.
+      //
+      // decode() can reject, and .catch handles that -- but it can also simply
+      // never settle, and no catch helps with a promise that never resolves.
+      // page.evaluate has no timeout of its own, so one such image hung the
+      // capture of a page forever and stalled a whole scan. requestAnimationFrame
+      // has the same problem: it stops firing if the renderer decides the page
+      // is not visible.
+      //
+      // Written without any `const fn = () => {}` inside the browser callback.
+      // esbuild rewrites those with its __name helper, which does not exist in
+      // the page and throws. Inline callbacks passed straight to a method are
+      // fine; a named one is not. Same rule as everywhere else in this file.
+      await Promise.race([
+        page.evaluate(async () => {
+          await Promise.race([
+            Promise.all(
+              Array.from(document.images).map((img) =>
+                img.decode
+                  ? Promise.race([
+                      img.decode().catch(() => undefined),
+                      new Promise((done) => setTimeout(done, 3_000)),
+                    ])
+                  : undefined,
+              ),
+            ),
+            new Promise((done) => setTimeout(done, 8_000)),
+          ]);
 
-        const step = Math.max(200, Math.floor(window.innerHeight / 2));
-        for (let y = 0; y < document.documentElement.scrollHeight; y += step) {
-          window.scrollTo(0, y);
-          await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
-        }
-        window.scrollTo(0, 0);
-        await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
-      });
+          const step = Math.max(200, Math.floor(window.innerHeight / 2));
+          const deadline = Date.now() + 20_000;
+          for (let y = 0; y < document.documentElement.scrollHeight; y += step) {
+            if (Date.now() > deadline) break;
+            window.scrollTo(0, y);
+            await Promise.race([
+              new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))),
+              new Promise((done) => setTimeout(done, 1_000)),
+            ]);
+          }
+          window.scrollTo(0, 0);
+          await Promise.race([
+            new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))),
+            new Promise((done) => setTimeout(done, 1_000)),
+          ]);
+        }),
+        // Last resort, on this side of the browser: if the page wedges so hard
+        // that even the timers above never run, the capture still moves on.
+        new Promise((done) => setTimeout(done, 30_000)),
+      ]);
+
       // One more beat for the compositor to commit the last frame.
       await page.waitForTimeout(150);
     }

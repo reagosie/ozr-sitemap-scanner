@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import os from 'node:os';
 import { Command } from 'commander';
 import { reporter } from './progress.js';
 import {
@@ -19,6 +20,7 @@ import {
   setBaseline,
   pruneRuns,
   runStartedAt,
+  acquireLock,
   acceptedKey,
 } from './store/runs.js';
 import type { PageCapture } from './capture/run.js';
@@ -250,6 +252,7 @@ program
   .option('--changed-only', 'capture only URLs whose lastmod moved (SPOT-CHECK ONLY, unsafe for a formal review)')
   .option('--no-external', 'skip external link checking')
   .option('--no-proofread', 'skip the copy checks')
+  .option('--force', 'start even if another scan of this site holds the lock')
   .option('--config <path>', 'config file', 'scanner.config.json')
   .action(async (site: string, opts) => {
     const config = await loadConfig(opts.config);
@@ -277,6 +280,43 @@ program
 
     const runId = newRunId();
     const keys = runKeys(origin, runId);
+
+    // Refuse a second scan of THIS site while one is already running.
+    //
+    // Per site, not per machine: scanning campozark.com and campotx.com at the
+    // same time is fine and shares nothing. Two scans of one site double the
+    // load on that site and throw away the loser's work, because only one of
+    // them can become the baseline.
+    const lock = await acquireLock(
+      backends.data,
+      origin,
+      {
+        runId,
+        startedAt: new Date().toISOString(),
+        machine: os.hostname(),
+        pid: process.pid,
+      },
+      { force: Boolean(opts.force) },
+    );
+
+    if (!lock.ok) {
+      const held = lock.heldBy;
+      const started = held ? new Date(held.startedAt) : null;
+      const mins = started ? Math.round((Date.now() - started.getTime()) / 60000) : null;
+      throw new Error(
+        `a scan of ${origin} is already running.
+` +
+          (held
+            ? `  run ${held.runId}, started ${mins} minute(s) ago on ${held.machine} (pid ${held.pid}).
+`
+            : '') +
+          `  Scans of OTHER sites are unaffected -- this only blocks this one.
+` +
+          `  If that scan is dead, re-run with --force to take over.`,
+      );
+    }
+
+    try {
     const baselineId = await getBaseline(backends.data, origin);
 
     await backends.data.putJson(keys.inventory, inv);
@@ -606,6 +646,11 @@ program
     log(`  view:      npm run serve -- ${site} ${runId}`);
     log(`  total time: ${reporter.elapsed()}`);
     log('');
+    } finally {
+      // However this ends -- success, failure, or a thrown error -- the lock
+      // goes. A lock left behind blocks the site until it expires.
+      await lock.handle?.release();
+    }
   });
 
 program
