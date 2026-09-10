@@ -337,6 +337,22 @@ function renderHtml(
   // Code updates go first in the emailable report too. A stakeholder reading
   // this needs to know a theme changed before they read a list of changed pages,
   // or the list looks alarming for no reason.
+  // A partial run has to say so before anything else. "Every page" below means
+  // every page THIS RUN captured, which is not the same as the site when the run
+  // was cut short. onwardlx.com's stored run holds 4 of its 44 pages and the
+  // report presented those 4 as the whole site.
+  const captureSet = input.inventory.entries.filter((e) => e.tier === 'A' || e.tier === 'B').length;
+  const partialBody =
+    captureSet > input.captures.length
+      ? `<div class="item" style="border-left:4px solid #b91c1c;padding-left:12px">
+          <div class="head"><span class="badge bad">Partial run</span></div>
+          <div class="meta">This run captured <strong>${input.captures.length}</strong> of the
+          <strong>${captureSet}</strong> pages that should be captured on this site. Everything
+          in this report describes only those ${input.captures.length} pages. The other
+          ${captureSet - input.captures.length} were not looked at.</div>
+        </div>`
+      : '';
+
   const assetChanges = input.assetChanges ?? [];
   const assetBody = assetChanges.length
     ? `<div class="item">
@@ -526,6 +542,7 @@ function renderHtml(
     ${cards.map(([label, n]) => `<div class="card"><div class="n">${esc(n)}</div><div class="l">${esc(label)}</div></div>`).join('')}
   </div>
 
+  ${partialBody}
   ${section("The site's code changed", assetBody, '')}
   ${section('Changed much more than the rest', outlierBody, '')}
   ${section('Broken links', brokenBody, 'Each link is listed once, with the pages it appears on and the text it is linked from. A link in the site-wide header or footer will show a large page count.')}

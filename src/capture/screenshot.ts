@@ -29,6 +29,25 @@ export interface TextBlock {
   text: string;
 }
 
+/**
+ * Where lazy-loading scripts keep the real image URL.
+ *
+ * WordPress sites almost all run one of these. The script puts a tiny grey SVG
+ * in `src` and the real address in one of these attributes, then swaps them
+ * when the image scrolls into view. onwardlx.com uses `data-lazy-src`, which is
+ * WP Rocket's.
+ *
+ * This matters because a placeholder passes every ordinary "has this image
+ * loaded?" test: it reports complete=true and a non-zero naturalWidth, since
+ * the placeholder itself really did load. The whole pricing panel on
+ * onwardlx.com/about-ole/ was captured as an empty grey box for exactly this
+ * reason, and nothing in the capture noticed.
+ */
+const LAZY_ATTRS = {
+  src: ['data-lazy-src', 'data-src', 'data-original', 'data-echo'],
+  srcset: ['data-lazy-srcset', 'data-srcset'],
+};
+
 export interface CaptureResult {
   url: string;
   ok: boolean;
@@ -171,11 +190,31 @@ export async function capturePage(
     // Bounded twice over: at most two rounds, and at most 20 images per round.
     // An image that is never going to load must not be able to stall the run.
     for (let round = 0; round < 2; round++) {
-      const stragglers: number[] = await page.evaluate(() =>
-        Array.from(document.images)
-          .filter((img) => img.currentSrc && !(img.complete && img.naturalWidth > 0))
-          .map((img) => img.getBoundingClientRect().top + window.scrollY),
-      );
+      const stragglers: number[] = await page.evaluate((lazyAttrs) => {
+        const out: number[] = [];
+        for (const img of Array.from(document.images)) {
+          const current = img.currentSrc || img.src || '';
+          // A `data:` URI in src next to a real URL in a data- attribute is a
+          // lazy-loading placeholder that was never swapped in.
+          const showingPlaceholder = !current || current.startsWith('data:');
+          const realSrc = lazyAttrs.src.map((a) => img.getAttribute(a)).find(Boolean);
+          const realSet = lazyAttrs.srcset.map((a) => img.getAttribute(a)).find(Boolean);
+
+          if (showingPlaceholder && (realSrc || realSet)) {
+            // Assign the real source directly instead of hoping another scroll
+            // makes the site's lazy-load script notice. Scrolling is a request;
+            // this is the thing itself.
+            if (realSet) img.setAttribute('srcset', realSet);
+            if (realSrc) img.setAttribute('src', realSrc);
+            out.push(img.getBoundingClientRect().top + window.scrollY);
+            continue;
+          }
+          if (current && !(img.complete && img.naturalWidth > 0)) {
+            out.push(img.getBoundingClientRect().top + window.scrollY);
+          }
+        }
+        return out;
+      }, LAZY_ATTRS);
       if (!stragglers.length) break;
 
       for (const y of stragglers.slice(0, 20)) {
@@ -213,6 +252,16 @@ export async function capturePage(
           document.documentElement.scrollHeight,
           imgs.length,
           imgs.filter((i) => i.complete && i.naturalWidth > 0).length,
+          // Counted separately because a placeholder reports complete=true with
+          // a real naturalWidth -- the count above cannot see that the picture
+          // on screen is a 1x1 grey rectangle rather than the photograph.
+          imgs.filter((i) => {
+            const current = i.currentSrc || i.src || '';
+            return (
+              (!current || current.startsWith('data:')) &&
+              cfg.lazyAttrs.some((a) => i.getAttribute(a))
+            );
+          }).length,
         ].join(':');
         // Require sustained quiet, not two adjacent samples. With several pages
         // loading concurrently a brief bandwidth stall looks identical to a
@@ -226,7 +275,12 @@ export async function capturePage(
         }
         await new Promise((r) => setTimeout(r, cfg.intervalMs));
       }
-    }, { maxMs: 15_000, intervalMs: 400, repeatsRequired: 3 });
+    }, {
+      maxMs: 15_000,
+      intervalMs: 400,
+      repeatsRequired: 3,
+      lazyAttrs: [...LAZY_ATTRS.src, ...LAZY_ATTRS.srcset],
+    });
 
     // Fonts settle after lazy content lands; a page screenshotted mid-swap
     // shows fallback metrics and diffs against itself.
@@ -349,6 +403,43 @@ export async function capturePage(
 
     // No `path`: the buffer goes to content-addressed storage under the hash of
     // these bytes, so writing it to a per-run filename here would be a detour.
+    // Final paint pass, immediately before the shutter.
+    //
+    // A full-page screenshot composites tiles the renderer has already drawn.
+    // An image can be fully loaded -- real src, complete=true, correct natural
+    // size -- and still be absent from the picture, because the region it lives
+    // in was never rasterised while it was off screen. Measured on
+    // onwardlx.com/about-ole/: the pricing panel was missing from 2 of 3
+    // captures with the image reporting as loaded in every one.
+    //
+    // Walking the viewport down the page and waiting for two animation frames
+    // at each stop forces the renderer to draw every band. Two frames, not one:
+    // the first schedules the paint and the second lets it finish.
+    {
+      await page.evaluate(async () => {
+        // decode() is the part that was missing. `complete` only promises the
+        // bytes arrived; decoding to a paintable bitmap can still be pending,
+        // and an undecoded image is drawn as nothing. Awaiting it is the
+        // difference between an image the DOM calls loaded and an image the
+        // renderer can actually put on screen.
+        await Promise.all(
+          Array.from(document.images).map((img) =>
+            img.decode ? img.decode().catch(() => undefined) : undefined,
+          ),
+        );
+
+        const step = Math.max(200, Math.floor(window.innerHeight / 2));
+        for (let y = 0; y < document.documentElement.scrollHeight; y += step) {
+          window.scrollTo(0, y);
+          await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+        }
+        window.scrollTo(0, 0);
+        await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      });
+      // One more beat for the compositor to commit the last frame.
+      await page.waitForTimeout(150);
+    }
+
     const buffer = await page.screenshot({
       fullPage: true,
       animations: 'disabled',

@@ -286,6 +286,11 @@ program
       canonicalOrigin: origin,
       startedAt: inv.discoveredAt,
       stage: opts.discoverOnly ? 'discover-only' : 'discover',
+      // Recorded because a partial run is indistinguishable from a complete one
+      // afterwards otherwise. onwardlx.com's baseline holds 4 of its 44 pages
+      // and nothing stored said so.
+      ...(opts.limit ? { limit: opts.limit } : {}),
+      changedOnly: Boolean(opts.changedOnly),
       baselineId,
       storage: backends.data.describe,
       config: { concurrency, breakpoints: config.breakpoints, diffThreshold: config.diffThreshold },

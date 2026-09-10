@@ -163,6 +163,7 @@ export function buildReport(input: ReportInput): string {
     summary: {
       urls: inv.entries.length,
       captured: input.captures.length,
+      captureSet: inv.entries.filter((e) => e.tier === 'A' || e.tier === 'B').length,
       flagged: rows.filter((r) => r.flagged).length,
       brokenLinks: input.links?.broken ?? 0,
       blockedLinks: input.links?.blocked ?? 0,
@@ -342,6 +343,21 @@ document.getElementById('cards').innerHTML = cards.map(function (c) {
 }).join('');
 
 var alerts = [];
+
+// A partial run must say so, loudly and first.
+//
+// "Every page" means every page THIS RUN captured. If the run was cut short --
+// by --limit, or by --changed-only -- that is a different set from the site,
+// and a reader has no way to tell. onwardlx.com's stored run holds 4 of its 44
+// pages, and the report presented those 4 as the whole site.
+if (DATA.summary.captureSet > DATA.summary.captured) {
+  alerts.push('<div class="alert err"><h3>This run covered part of the site</h3>' +
+    '<p>It captured <strong>' + DATA.summary.captured + '</strong> of the <strong>' +
+    DATA.summary.captureSet + '</strong> pages that should be captured. ' +
+    'Everything below describes only those ' + DATA.summary.captured + ' pages. ' +
+    'The other ' + (DATA.summary.captureSet - DATA.summary.captured) +
+    ' were not looked at at all.</p></div>');
+}
 
 // Theme and plugin updates come FIRST, before any list of changed pages,
 // because they are usually the reason those pages changed. Without this the
