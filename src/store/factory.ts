@@ -1,5 +1,6 @@
 import type { Config } from '../config.js';
 import type { StorageBackend } from './backend.js';
+import { reporter } from '../progress.js';
 
 export interface Backends {
   /** Runs, screenshots, metadata. */
@@ -40,15 +41,21 @@ export async function createBackends(config: Config): Promise<Backends> {
       );
     }
     const { S3Backend } = await import('./s3.js');
-    return {
-      data: new S3Backend({ bucket, region: config.storage.region, prefix: config.storage.dataPrefix }),
-      reports: new S3Backend({
-        bucket,
-        region: config.storage.region,
-        prefix: config.storage.reportsPrefix,
-      }),
-      central: true,
-    };
+    const data = new S3Backend({
+      bucket,
+      region: config.storage.region,
+      prefix: config.storage.dataPrefix,
+    });
+    const reports = new S3Backend({
+      bucket,
+      region: config.storage.region,
+      prefix: config.storage.reportsPrefix,
+    });
+    // A retry says so in the run log. Silent retries hide a failing network
+    // until the attempts run out, and then the scan dies with no warning.
+    data.onRetry = (msg) => reporter.log(msg);
+    reports.onRetry = (msg) => reporter.log(msg);
+    return { data, reports, central: true };
   }
 
   const { LocalBackend } = await import('./local.js');

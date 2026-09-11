@@ -22,6 +22,53 @@ export interface S3BackendOptions {
   prefix?: string;
 }
 
+/**
+ * Network faults worth another try.
+ *
+ * ENOTFOUND is the one that matters. It is a DNS lookup failure, and the AWS
+ * SDK does NOT retry it: its own retry logic covers timeouts, throttling and
+ * 5xx replies, but treats "the name did not resolve" as final. A campozark
+ * baseline ran for two hours, reached 317 of 525 pages on its last pass, and
+ * died on a single ENOTFOUND when the network blinked. Two hours of work thrown
+ * away by an outage that lasted seconds.
+ */
+const RETRYABLE_NETWORK_CODES = new Set([
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'ECONNRESET',
+  'ECONNREFUSED',
+  'ECONNABORTED',
+  'ETIMEDOUT',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'ENETDOWN',
+  'EPIPE',
+  'EPROTO',
+  'ERR_SOCKET_CONNECTION_TIMEOUT',
+]);
+
+const RETRYABLE_NAMES = new Set([
+  'TimeoutError',
+  'RequestTimeout',
+  'RequestTimeoutException',
+  'NetworkingError',
+]);
+
+/** Six tries: 1s, 2s, 4s, 8s, 16s of waiting, about half a minute in total. */
+const MAX_ATTEMPTS = 6;
+const BASE_DELAY_MS = 1_000;
+
+export function isRetryableAwsError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as { code?: string; name?: string; $metadata?: { httpStatusCode?: number }; cause?: unknown };
+  if (e.code && RETRYABLE_NETWORK_CODES.has(e.code)) return true;
+  if (e.name && (RETRYABLE_NAMES.has(e.name) || RETRYABLE_NETWORK_CODES.has(e.name))) return true;
+  const status = e.$metadata?.httpStatusCode;
+  if (status && (status === 429 || status >= 500)) return true;
+  // The SDK wraps the socket error, so the real code is often one level down.
+  return e.cause ? isRetryableAwsError(e.cause) : false;
+}
+
 export class S3Backend implements StorageBackend {
   readonly describe: string;
   readonly canPresign = true;
@@ -29,12 +76,37 @@ export class S3Backend implements StorageBackend {
   private readonly client: S3Client;
   private readonly bucket: string;
   private readonly prefix: string;
+  /** Set by the CLI so a retry is visible in the run log rather than silent. */
+  onRetry?: (msg: string) => void;
 
   constructor(opts: S3BackendOptions) {
     this.bucket = opts.bucket;
     this.prefix = (opts.prefix ?? '').replace(/^\/+|\/+$/g, '');
     this.client = new S3Client({ region: opts.region });
     this.describe = `s3://${this.bucket}${this.prefix ? '/' + this.prefix : ''}`;
+  }
+
+  /**
+   * Run one S3 call, retrying a network fault with growing pauses.
+   *
+   * Deliberately NOT used for putJsonConditional. A conditional write whose
+   * reply is lost may already have landed, and retrying it would come back
+   * 412 Precondition Failed -- so a lock we ourselves just took would be
+   * reported as held by somebody else. Failing there is honest; retrying is a
+   * lie. Every other call here is safe to repeat.
+   */
+  private async retrying<T>(what: string, run: () => Promise<T>): Promise<T> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await run();
+      } catch (err) {
+        if (attempt >= MAX_ATTEMPTS || !isRetryableAwsError(err)) throw err;
+        const wait = BASE_DELAY_MS * 2 ** (attempt - 1);
+        const why = err instanceof Error ? err.message.split('\n')[0] : String(err);
+        this.onRetry?.(`  s3 ${what}: ${why} -- retrying in ${wait / 1000}s (${attempt}/${MAX_ATTEMPTS - 1})`);
+        await new Promise((done) => setTimeout(done, wait));
+      }
+    }
   }
 
   private full(key: string): string {
@@ -49,20 +121,22 @@ export class S3Backend implements StorageBackend {
   }
 
   async putBuffer(key: string, body: Buffer, contentType?: string): Promise<void> {
-    await this.client.send(
-      new PutObjectCommand({
-        Bucket: this.bucket,
-        Key: this.full(key),
-        Body: body,
-        ...(contentType ? { ContentType: contentType } : {}),
-      }),
+    await this.retrying(`put ${key}`, () =>
+      this.client.send(
+        new PutObjectCommand({
+          Bucket: this.bucket,
+          Key: this.full(key),
+          Body: body,
+          ...(contentType ? { ContentType: contentType } : {}),
+        }),
+      ),
     );
   }
 
   async getBuffer(key: string): Promise<Buffer | null> {
     try {
-      const res = await this.client.send(
-        new GetObjectCommand({ Bucket: this.bucket, Key: this.full(key) }),
+      const res = await this.retrying(`get ${key}`, () =>
+        this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: this.full(key) })),
       );
       if (!res.Body) return null;
       return Buffer.from(await res.Body.transformToByteArray());
@@ -96,8 +170,8 @@ export class S3Backend implements StorageBackend {
 
   async head(key: string): Promise<ObjectMeta | null> {
     try {
-      const res = await this.client.send(
-        new HeadObjectCommand({ Bucket: this.bucket, Key: this.full(key) }),
+      const res = await this.retrying(`head ${key}`, () =>
+        this.client.send(new HeadObjectCommand({ Bucket: this.bucket, Key: this.full(key) })),
       );
       return {
         key,
@@ -116,13 +190,15 @@ export class S3Backend implements StorageBackend {
     let token: string | undefined;
 
     do {
-      const res = await this.client.send(
-        new ListObjectsV2Command({
-          Bucket: this.bucket,
-          Prefix: base,
-          Delimiter: '/',
-          ContinuationToken: token,
-        }),
+      const res = await this.retrying(`list ${prefix}`, () =>
+        this.client.send(
+          new ListObjectsV2Command({
+            Bucket: this.bucket,
+            Prefix: base,
+            Delimiter: '/',
+            ContinuationToken: token,
+          }),
+        ),
       );
       for (const cp of res.CommonPrefixes ?? []) {
         if (!cp.Prefix) continue;
@@ -140,12 +216,14 @@ export class S3Backend implements StorageBackend {
     let token: string | undefined;
 
     do {
-      const res = await this.client.send(
-        new ListObjectsV2Command({
-          Bucket: this.bucket,
-          Prefix: base,
-          ContinuationToken: token,
-        }),
+      const res = await this.retrying(`list ${prefix}`, () =>
+        this.client.send(
+          new ListObjectsV2Command({
+            Bucket: this.bucket,
+            Prefix: base,
+            ContinuationToken: token,
+          }),
+        ),
       );
       for (const obj of res.Contents ?? []) {
         if (!obj.Key) continue;
@@ -164,19 +242,21 @@ export class S3Backend implements StorageBackend {
   async remove(keys: string[]): Promise<void> {
     for (let i = 0; i < keys.length; i += DELETE_BATCH) {
       const batch = keys.slice(i, i + DELETE_BATCH);
-      await this.client.send(
-        new DeleteObjectsCommand({
-          Bucket: this.bucket,
-          Delete: { Objects: batch.map((k) => ({ Key: this.full(k) })), Quiet: true },
-        }),
+      await this.retrying(`delete ${batch.length} object(s)`, () =>
+        this.client.send(
+          new DeleteObjectsCommand({
+            Bucket: this.bucket,
+            Delete: { Objects: batch.map((k) => ({ Key: this.full(k) })), Quiet: true },
+          }),
+        ),
       );
     }
   }
 
   async readTagged<T>(key: string): Promise<{ data: T; tag: string } | null> {
     try {
-      const res = await this.client.send(
-        new GetObjectCommand({ Bucket: this.bucket, Key: this.full(key) }),
+      const res = await this.retrying(`get ${key}`, () =>
+        this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: this.full(key) })),
       );
       if (!res.Body || !res.ETag) return null;
       const buf = Buffer.from(await res.Body.transformToByteArray());
