@@ -139,6 +139,15 @@ export function checkConsistency(corpus: Corpus, opts: ConsistencyOptions): Copy
       if (form === dominant) continue;
       if (!configured && info.pages.size > dominantInfo.pages.size * VARIANT_RATIO) continue;
 
+      // Straight vs curly apostrophe is not a naming decision either.
+      //
+      // "OTX's" against "OTX’s" is the same name typed in two editors, and it
+      // was reported at high confidence on campotx. Nobody reading the site can
+      // see the difference. The straight-vs-curly check was taken out of the
+      // mechanical rules for exactly this reason; it has no more business here.
+      const flatten = (t: string): string => t.replace(/[‘’ʼ]/g, "'");
+      if (flatten(form) === flatten(dominant)) continue;
+
       // The FIRST letter's case is never a naming decision.
       //
       // It is set by sentence position and by title casing: "the incomparable
