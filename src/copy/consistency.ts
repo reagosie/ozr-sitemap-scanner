@@ -1,4 +1,4 @@
-import { excerptAround, findingId, type Corpus } from './extract.js';
+import { excerptAround, findingId, maskNonProse, type Corpus } from './extract.js';
 import type { CopyFinding } from './types.js';
 
 export interface ConsistencyOptions {
@@ -55,9 +55,17 @@ export function checkConsistency(corpus: Corpus, opts: ConsistencyOptions): Copy
   // and every button is title-cased. A phrase qualifies only if at least one of
   // its words is absent from the dictionary, which is what "Camp Ozark" has and
   // "Contact Us" does not.
+  // Both passes read the MASKED text.
+  //
+  // A URL is not prose, and it is full of the site's own name.
+  // onwardlx.com links to campozark.com forty-four times, so "campozark" -- the
+  // domain, never written that way by a human -- outvoted the one correct
+  // "Camp Ozark" on the page, and the check reported the right spelling as the
+  // mistake. maskNonProse blanks emails and URLs while keeping their length, so
+  // offsets into block.text still line up and excerpts still read normally.
   const nameKeys = new Set<string>();
   for (const block of corpus.blocks) {
-    for (const m of block.text.matchAll(
+    for (const m of maskNonProse(block.text).matchAll(
       /\b[A-Z][A-Za-z'’]*(?:[ \-][A-Z][A-Za-z'’]*){0,2}\b/g,
     )) {
       const phrase = m[0];
@@ -78,7 +86,7 @@ export function checkConsistency(corpus: Corpus, opts: ConsistencyOptions): Copy
   const forms = new Map<string, Map<string, Surface>>();
 
   for (const block of corpus.blocks) {
-    const tokens = [...block.text.matchAll(/[A-Za-z0-9'’]+/g)];
+    const tokens = [...maskNonProse(block.text).matchAll(/[A-Za-z0-9'’]+/g)];
 
     for (let i = 0; i < tokens.length; i++) {
       for (let n = 1; n <= MAX_NGRAM && i + n <= tokens.length; n++) {

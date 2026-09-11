@@ -16,12 +16,21 @@ const CHUNK_CHARS = 10_000;
  * this site and would reproduce exactly the "Ozark is not a word" noise that
  * spelling.ts exists to prevent, and double-report every genuine typo.
  *
+ * ENGLISH_WORD_REPEAT_BEGINNING_RULE is "three sentences in a row start with
+ * the same word". That is advice about flowing prose, and what this tool feeds
+ * it is not flowing prose -- it is separate blocks of page text, mostly headings
+ * and list items. On onwardlx's FAQ pages every question begins "What" or "Do",
+ * because that is what a list of questions looks like, and the rule fired four
+ * times on a site with nine findings. It was measuring the shape of the page,
+ * not the writing.
+ *
  * ENGLISH_WORD_REPEAT_RULE is doubled words, which retext-repeated-words
  * already finds. Leaving both on reported campotx's one real "to to" twice, in
  * two different sections of the report -- and a reviewer who sees the same
  * defect listed twice stops trusting the counts.
  */
-const DISABLED_RULES = 'MORFOLOGIK_RULE_EN_US,ENGLISH_WORD_REPEAT_RULE';
+const DISABLED_RULES =
+  'MORFOLOGIK_RULE_EN_US,ENGLISH_WORD_REPEAT_RULE,ENGLISH_WORD_REPEAT_BEGINNING_RULE';
 
 /** Rule categories that duplicate checks retext already does better. */
 const DUPLICATE_CATEGORIES = new Set(['TYPOGRAPHY', 'TYPOS']);
@@ -59,7 +68,7 @@ const CONFIDENCE_BY_ISSUE_TYPE: Record<string, Confidence> = {
  * owner gets to make; using the wrong article is not.
  */
 const STYLE_RULE_PREFIXES = ['EN_COMPOUNDS', 'SENT_START_', 'COMMA_', 'DASH_', 'EN_WORDINESS'];
-const STYLE_RULE_IDS = new Set(['YEAR_OLD_HYPHEN', 'ENGLISH_WORD_REPEAT_BEGINNING_RULE']);
+const STYLE_RULE_IDS = new Set(['YEAR_OLD_HYPHEN']);
 
 /**
  * Hedged phrasing, which is LanguageTool saying "preference" out loud.
