@@ -1,7 +1,6 @@
 import { retext } from 'retext';
 import retextRepeatedWords from 'retext-repeated-words';
 import retextIndefiniteArticle from 'retext-indefinite-article';
-import retextQuotes from 'retext-quotes';
 import retextSentenceSpacing from 'retext-sentence-spacing';
 import { excerptAround, findingId, type Corpus } from './extract.js';
 import type { Confidence, CopyFinding } from './types.js';
@@ -10,59 +9,40 @@ import type { Confidence, CopyFinding } from './types.js';
  * How much to trust each rule.
  *
  * The first two are mechanical facts -- "the the" is wrong in every register.
- * The last two are house style, and on a site edited by several people over
- * years they fire constantly without anything being broken, so they are ranked
- * below the real defects rather than left out (a reviewer may still want them).
+ * Sentence spacing is house style, and on a site edited by several people over
+ * years it fires constantly without anything being broken, so it is ranked
+ * below the real defects rather than left out (a reviewer may still want it).
+ *
+ * The straight-vs-curly apostrophe check used to live here and is gone on
+ * purpose. It fired on text pasted in from another editor -- "Position I'm
+ * Interested In" -- which nobody reading the site will ever notice, and which
+ * is not worth a row in a list a person has to read top to bottom. A checker
+ * that reports invisible defects teaches the reader to skip the section.
  */
 const CONFIDENCE_BY_SOURCE: Record<string, Confidence> = {
   'retext-repeated-words': 'high',
   'retext-indefinite-article': 'high',
   'retext-sentence-spacing': 'low',
-  'retext-quotes': 'low',
 };
-
-/**
- * Match the site's own quote style rather than imposing one.
- *
- * retext-quotes defaults to preferring typographic quotes, which on a site that
- * consistently uses straight ones would flag every apostrophe on every page.
- * Counting first turns the rule from "you disagree with the default" into
- * "this page disagrees with the rest of your site", which is the only version
- * worth reporting.
- */
-export function dominantQuoteStyle(corpus: Corpus): 'smart' | 'straight' {
-  let smart = 0;
-  let straight = 0;
-  for (const block of corpus.blocks) {
-    for (const ch of block.text) {
-      if (ch === '\u2018' || ch === '\u2019' || ch === '\u201C' || ch === '\u201D') smart++;
-      else if (ch === "'" || ch === '"') straight++;
-    }
-  }
-  return smart > straight ? 'smart' : 'straight';
-}
 
 /**
  * Rules whose findings become meaningless once they are everywhere.
  *
- * A straight apostrophe on all 45 pages is not 45 defects, it is the site's
- * punctuation. Reporting it puts four unfixable rows at the top of a section
- * that has to stay worth reading. The genuinely mechanical rules -- repeated
- * words, wrong article -- are never suppressed, however widespread: those are
- * wrong at any scale.
+ * Two spaces after every full stop across 45 pages is not 45 defects, it is the
+ * site's typing habit. Reporting it puts unfixable rows in a section that has
+ * to stay worth reading. The genuinely mechanical rules -- repeated words,
+ * wrong article -- are never suppressed, however widespread: those are wrong at
+ * any scale.
  */
-const STYLISTIC_SOURCES = new Set(['retext-quotes', 'retext-sentence-spacing']);
+const STYLISTIC_SOURCES = new Set(['retext-sentence-spacing']);
 
 /** Above this share of pages, a stylistic rule describes the house style. */
 const HOUSE_STYLE_SHARE = 0.25;
 
 export async function checkMechanical(corpus: Corpus): Promise<CopyFinding[]> {
-  const preferred = dominantQuoteStyle(corpus);
-
   const processor = retext()
     .use(retextRepeatedWords)
     .use(retextIndefiniteArticle)
-    .use(retextQuotes, { preferred })
     .use(retextSentenceSpacing);
 
   // Keyed so an identical defect in two different blocks (a repeated heading,

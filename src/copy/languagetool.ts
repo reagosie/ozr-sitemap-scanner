@@ -71,6 +71,27 @@ const STYLE_RULE_IDS = new Set(['YEAR_OLD_HYPHEN', 'ENGLISH_WORD_REPEAT_BEGINNIN
 const HEDGED_MESSAGE =
   /\b(consider using|consider whether|some style guides|is normally spelled|are normally spelled|you can shorten|may be missing|it seems that|it appears that)\b/i;
 
+/**
+ * Rules that are simply wrong in a construction we can recognise.
+ *
+ * These are not style preferences to rank low -- they are LanguageTool making a
+ * false claim, so they are dropped entirely. A demoted false claim is still a
+ * false claim sitting in the report, and the reviewer still has to read it and
+ * work out that it is wrong.
+ *
+ * TO_NON_BASE: "the verb after 'to' must be in its base form". True when "to"
+ * starts an infinitive ("to went home"). Not true when "to" is a preposition,
+ * where an -ing word is normal English -- "teaching curriculum TO PARTICIPATING
+ * young adults", where "participating" describes the adults. LanguageTool
+ * already handles the common shapes ("look forward to seeing", "committed to
+ * helping"); it is the leftovers that misfire. Every genuine error this rule
+ * catches is a tensed or inflected verb, never an -ing word, so dropping the
+ * -ing case loses nothing real.
+ */
+function isKnownMisfire(ruleId: string, match: string): boolean {
+  return ruleId === 'TO_NON_BASE' && /ing$/i.test(match.trim());
+}
+
 function isHouseStyle(ruleId: string, message: string): boolean {
   if (STYLE_RULE_IDS.has(ruleId)) return true;
   if (STYLE_RULE_PREFIXES.some((p) => ruleId.startsWith(p))) return true;
@@ -258,6 +279,7 @@ export async function checkGrammar(
       if (!match.trim()) continue;
 
       const ruleId = m.rule?.id ?? 'grammar';
+      if (isKnownMisfire(ruleId, match)) continue;
       const key = `${ruleId}|${match}|${m.message}`;
       const existing = byKey.get(key);
       if (existing) {

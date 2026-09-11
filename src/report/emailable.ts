@@ -6,6 +6,7 @@ import type { ReportInput } from './build.js';
 import { silentReporter, type Reporter } from '../progress.js';
 import { describeAssetChange } from '../assets.js';
 import { findOutliers, worstRatio } from '../diff/run.js';
+import type { CopyFinding } from '../copy/types.js';
 
 export interface PublishOptions {
   /** Flagged pages whose screenshots are embedded. Beyond this, links only. */
@@ -321,10 +322,25 @@ function renderHtml(
     ['Links checked', input.links?.checked ?? 0],
   ];
 
-  const section = (title: string, body: string, note = ''): string =>
-    body
-      ? `<section><h2>${esc(title)}</h2>${note ? `<p class="note">${note}</p>` : ''}${body}</section>`
-      : '';
+  // Every section is collapsed until it is clicked.
+  //
+  // A campozark report is hundreds of screenshots and hundreds of findings in
+  // one scroll, and the length itself puts a reader off before they have read a
+  // word of it. Collapsed, the whole report is a dozen named rows with a count
+  // on each, and the reader chooses what to open. Nothing is removed -- only
+  // the demand that they scroll past all of it.
+  //
+  // <details> needs no JavaScript, which matters: this file is emailed, saved
+  // and reopened from disk. The expand-all buttons are the only scripted part,
+  // and the report is complete without them.
+  const section = (title: string, body: string, note = '', count?: number): string => {
+    if (!body) return '';
+    // Printing has no click, so every section is open in the PDF.
+    const open = meta.forPrint ? ' open' : '';
+    const badge = count === undefined ? '' : `<span class="cnt">${esc(count)}</span>`;
+    return `<details class="sec"${open}><summary>${esc(title)}${badge}</summary>
+      <div class="secbody">${note ? `<p class="note">${note}</p>` : ''}${body}</div></details>`;
+  };
 
   const pageList = (pages: string[], cap = 12): string =>
     `<ul class="pages">${pages
@@ -397,30 +413,55 @@ function renderHtml(
         .join('')
     : '';
 
+  // Copy findings split by how sure the checker is, not just by category.
+  //
+  // "Sunday December 7th is actually a Monday" and "some style guides prefer a
+  // comma here" were sitting in one list, and a reader who hits three
+  // preferences first concludes the whole section is preferences. The low-
+  // confidence group is still here in full -- a reviewer who wants to tighten
+  // the copy can open it -- but it no longer stands between the reader and a
+  // real defect.
+  const copyGroup = (list: CopyFinding[]): string =>
+    Object.keys(CATEGORY_LABELS)
+      .map((cat) => {
+        const inCat = list.filter((x) => x.category === cat);
+        if (!inCat.length) return '';
+        return `<h3>${esc(CATEGORY_LABELS[cat] ?? cat)} <span class="muted">(${inCat.length})</span></h3>${inCat
+          .slice(0, 60)
+          .map(
+            (x) => `<div class="item">
+              <div class="head"><span class="badge ${x.confidence === 'high' ? 'bad' : 'warn'}">${esc(
+                x.confidence,
+              )}</span> <code>${esc(x.match)}</code></div>
+              <div class="msg">${esc(x.message)}</div>
+              <div class="excerpt">${esc(x.excerpt)}</div>
+              <div class="meta">On ${x.pages.length} page${x.pages.length === 1 ? '' : 's'}</div>
+              ${pageList(x.pages, 6)}
+            </div>`,
+          )
+          .join('')}${inCat.length > 60 ? `<p class="muted">and ${inCat.length - 60} more</p>` : ''}`;
+      })
+      .join('');
+
+  const likelyCopy = f.copy.filter((x) => x.confidence !== 'low');
+  const optionalCopy = f.copy.filter((x) => x.confidence === 'low');
+
   const copyBody = f.copy.length
-    ? Object.keys(CATEGORY_LABELS)
-        .map((cat) => {
-          const list = f.copy.filter((x) => x.category === cat);
-          if (!list.length) return '';
-          return `<h3>${esc(CATEGORY_LABELS[cat] ?? cat)} <span class="muted">(${list.length})</span></h3>${list
-            .slice(0, 60)
-            .map(
-              (x) => `<div class="item">
-                <div class="head"><span class="badge ${x.confidence === 'high' ? 'bad' : 'warn'}">${esc(
-                  x.confidence,
-                )}</span> <code>${esc(x.match)}</code></div>
-                <div class="msg">${esc(x.message)}</div>
-                <div class="excerpt">${esc(x.excerpt)}</div>
-                <div class="meta">On ${x.pages.length} page${x.pages.length === 1 ? '' : 's'}</div>
-                ${pageList(x.pages, 6)}
-              </div>`,
-            )
-            .join('')}${
-            list.length > 60 ? `<p class="muted">and ${list.length - 60} more</p>` : ''
-          }`;
-        })
-        .join('')
+    ? (likelyCopy.length
+        ? `<h2 class="grp">Likely problems <span class="muted">(${likelyCopy.length})</span></h2>${copyGroup(
+            likelyCopy,
+          )}`
+        : '') +
+      (optionalCopy.length
+        ? `<h2 class="grp">Style suggestions &mdash; your call <span class="muted">(${
+            optionalCopy.length
+          })</span></h2><p class="note">Nothing here is wrong. These are house-style preferences,
+          and a different reviewer would disagree with some of them.</p>${copyGroup(optionalCopy)}`
+        : '')
     : '';
+
+  const discoveryCount =
+    f.missing.reduce((n, m) => n + m.urls.length, 0) + f.possiblyMissed.length + f.errors.length;
 
   const discoveryBody =
     (f.missing.length
@@ -465,7 +506,7 @@ function renderHtml(
 
   const linksBody =
     meta.canLink && links.length
-      ? `<details><summary>Full-size screenshot for each of the ${links.length} pages checked</summary>
+      ? `<details class="inner"><summary>Full-size screenshot for each of the ${links.length} pages checked</summary>
          <ul class="pages">${links
            .map((l) => `<li><a href="${esc(l.url)}">${esc(l.loc)}</a></li>`)
            .join('')}</ul></details>`
@@ -489,8 +530,8 @@ function renderHtml(
   }
   .wrap { max-width: 900px; margin: 0 auto; padding: 32px 20px 64px; }
   h1 { font-size: 26px; margin: 0 0 4px; letter-spacing: -0.01em; }
-  h2 {
-    font-size: 18px; margin: 36px 0 12px; padding-bottom: 6px;
+  h2.grp {
+    font-size: 16px; margin: 20px 0 10px; padding-bottom: 6px;
     border-bottom: 2px solid var(--accent);
   }
   h3 { font-size: 14px; margin: 22px 0 8px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
@@ -520,14 +561,55 @@ function renderHtml(
   figure { margin: 0; }
   figcaption { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
   img { width: 100%; height: auto; border: 1px solid var(--line); border-radius: 4px; }
-  details { margin: 10px 0; }
-  summary { cursor: pointer; color: var(--accent); }
+  details.inner { margin: 10px 0; }
+  details.inner > summary { cursor: pointer; color: var(--accent); }
+
+  /* Collapsed sections. See the section() helper for why. */
+  details.sec {
+    border: 1px solid var(--line); border-radius: 6px; margin: 10px 0; overflow: hidden;
+  }
+  details.sec > summary {
+    list-style: none; cursor: pointer; padding: 13px 15px;
+    font-size: 17px; font-weight: 600; color: var(--ink);
+    display: flex; align-items: center; gap: 11px;
+  }
+  details.sec > summary::-webkit-details-marker { display: none; }
+  details.sec > summary::before {
+    content: ''; flex: none; width: 0; height: 0;
+    border-left: 6px solid var(--accent);
+    border-top: 5px solid transparent; border-bottom: 5px solid transparent;
+    transition: transform 0.12s ease;
+  }
+  details.sec[open] > summary::before { transform: rotate(90deg); }
+  details.sec > summary:hover { background: var(--panel); }
+  details.sec[open] > summary { border-bottom: 1px solid var(--line); }
+  .secbody { padding: 2px 15px 16px; }
+  .cnt {
+    margin-left: auto; font-size: 13px; font-weight: 600; color: var(--muted);
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 11px; padding: 1px 10px; font-variant-numeric: tabular-nums;
+  }
+  .tools { display: flex; gap: 8px; margin: 18px 0 2px; }
+  .tools button {
+    font: inherit; font-size: 13px; color: var(--accent); cursor: pointer;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 5px; padding: 4px 11px;
+  }
+  .tools button:hover { background: var(--panel); }
   footer { margin-top: 48px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
   @media print {
     .wrap { max-width: none; padding: 0; }
     h2 { break-after: avoid; }
     .item, .page { break-inside: avoid; }
-    details { display: none; }
+    /* Only the per-page screenshot links are dropped from print. The sections
+       themselves are rendered open -- see section(). */
+    details.inner, .tools { display: none; }
+    details.sec { border: none; }
+    details.sec > summary {
+      font-size: 18px; padding: 0 0 6px; border-bottom: 2px solid var(--accent);
+      margin-top: 30px; break-after: avoid;
+    }
+    details.sec > summary::before { display: none; }
+    .secbody { padding: 0; }
   }
 </style>
 </head>
@@ -543,19 +625,28 @@ function renderHtml(
   </div>
 
   ${partialBody}
-  ${section("The site's code changed", assetBody, '')}
-  ${section('Changed much more than the rest', outlierBody, '')}
-  ${section('Broken links', brokenBody, 'Each link is listed once, with the pages it appears on and the text it is linked from. A link in the site-wide header or footer will show a large page count.')}
-  ${section('Copy issues', copyBody, f.copySkipped.length ? `Not run: ${f.copySkipped.map((s) => `${esc(s.check)} (${esc(s.reason)})`).join('; ')}` : '')}
-  ${section('Discovery', discoveryBody)}
+  ${
+    meta.forPrint
+      ? ''
+      : `<div class="tools">
+    <button type="button" data-all="1">Expand all</button>
+    <button type="button" data-all="0">Collapse all</button>
+  </div>`
+  }
+  ${section("The site's code changed", assetBody, '', assetChanges.length)}
+  ${section('Changed much more than the rest', outlierBody, '', outliers.length)}
+  ${section('Broken links', brokenBody, 'Each link is listed once, with the pages it appears on and the text it is linked from. A link in the site-wide header or footer will show a large page count.', f.broken.length)}
+  ${section('Copy issues', copyBody, f.copySkipped.length ? `Not run: ${f.copySkipped.map((s) => `${esc(s.check)} (${esc(s.reason)})`).join('; ')}` : '', f.copy.length)}
+  ${section('Discovery', discoveryBody, '', discoveryCount)}
   ${section(
     'Visual changes',
     visualBody,
     meta.truncated
       ? `Showing the ${embedded.length} most-changed pages of ${flaggedCount}. The rest are in the full report.`
       : '',
+    embedded.length,
   )}
-  ${section('Every page', linksBody, meta.canLink ? 'These screenshot links expire 7 days after this report was generated. The images above do not.' : '')}
+  ${section('Every page', linksBody, meta.canLink ? 'These screenshot links expire 7 days after this report was generated. The images above do not.' : '', links.length)}
 
   <footer>
     Generated by Sitemap Scanner. ${esc(input.captures.length)} pages captured at ${esc(
@@ -564,6 +655,19 @@ function renderHtml(
     ${input.copy ? `${esc(input.copy.blocksChecked)} distinct text blocks proofread (${esc(input.copy.wordsChecked.toLocaleString())} words).` : ''}
   </footer>
 </div>
+${
+  meta.forPrint
+    ? ''
+    : `<script>
+  // The only script in the file. Everything works with it removed.
+  document.querySelectorAll('.tools button').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var open = b.dataset.all === '1';
+      document.querySelectorAll('details.sec').forEach(function (d) { d.open = open; });
+    });
+  });
+</script>`
+}
 </body>
 </html>`;
 }

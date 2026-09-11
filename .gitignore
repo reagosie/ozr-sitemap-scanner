@@ -7,3 +7,6 @@ runs/
 # Scan outputs (site-specific findings, not tool code)
 handoff-data.json
 *-site-audit-*.html
+
+# Reports and JSON pulled down from S3 for inspection.
+out/

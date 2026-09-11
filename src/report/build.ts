@@ -223,6 +223,28 @@ const TEMPLATE = `<!doctype html>
   .alert.warn h3 { color:var(--warn); }
   .alert ul { margin:0; padding-left:18px; }
   .alert li { margin:2px 0; color:var(--dim); }
+  /* Collapsed by default: see alertBox(). The page opens as a list of named
+     rows with a count on each, instead of a wall the reader has to scroll. */
+  details.alert { padding:0; overflow:hidden; }
+  details.alert > summary { list-style:none; cursor:pointer; padding:12px 16px;
+    display:flex; align-items:center; gap:10px; font-size:13px; font-weight:600;
+    text-transform:uppercase; letter-spacing:.05em; }
+  details.alert > summary::-webkit-details-marker { display:none; }
+  details.alert > summary::before { content:''; flex:none; width:0; height:0;
+    border-left:6px solid currentColor; border-top:5px solid transparent;
+    border-bottom:5px solid transparent; transition:transform .12s ease; }
+  details.alert[open] > summary::before { transform:rotate(90deg); }
+  details.alert[open] > summary { border-bottom:1px solid var(--line); }
+  details.alert.err > summary { color:var(--flag); }
+  details.alert.warn > summary { color:var(--warn); }
+  details.alert .cnt { margin-left:auto; text-transform:none; letter-spacing:0;
+    font-size:12px; color:var(--dim); background:var(--bg);
+    border:1px solid var(--line); border-radius:10px; padding:1px 9px; }
+  .alertbody { padding:10px 16px 14px; }
+  .alerttools { display:flex; gap:8px; padding:4px 24px 12px; }
+  .alerttools button { font:inherit; font-size:12px; color:var(--text); cursor:pointer;
+    background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:4px 11px; }
+  .alerttools button:hover { border-color:var(--dim); }
   .controls { display:flex; gap:12px; align-items:center; flex-wrap:wrap;
     padding:12px 24px; border-top:1px solid var(--line); border-bottom:1px solid var(--line);
     position:sticky; top:0; background:var(--bg); z-index:5; }
@@ -271,6 +293,10 @@ const TEMPLATE = `<!doctype html>
   <div class="sub" id="subtitle"></div>
 </header>
 <div class="cards" id="cards"></div>
+<div class="alerttools" id="alerttools" hidden>
+  <button type="button" data-all="1">Expand all</button>
+  <button type="button" data-all="0">Collapse all</button>
+</div>
 <div id="alerts"></div>
 <div class="controls">
   <input type="search" id="q" placeholder="Filter by URL or type...">
@@ -344,6 +370,22 @@ document.getElementById('cards').innerHTML = cards.map(function (c) {
 
 var alerts = [];
 
+// One collapsed row per section.
+//
+// The report opened with every section expanded at once, and on a big site the
+// length alone put people off before they read any of it. Collapsed, the top of
+// the page is a short list of names and counts and the reader picks what to
+// open. Nothing is removed.
+//
+// The partial-run warning below is deliberately NOT one of these. It is a
+// single sentence saying the report covers only part of the site, and hiding
+// that behind a click is how someone reads a partial report as a whole one.
+function alertBox(kind, title, count, body) {
+  return '<details class="alert ' + kind + '"><summary>' + esc(title) +
+    (count === null ? '' : '<span class="cnt">' + count + '</span>') +
+    '</summary><div class="alertbody">' + body + '</div></details>';
+}
+
 // A partial run must say so, loudly and first.
 //
 // "Every page" means every page THIS RUN captured. If the run was cut short --
@@ -363,17 +405,17 @@ if (DATA.summary.captureSet > DATA.summary.captured) {
 // because they are usually the reason those pages changed. Without this the
 // reviewer sees hundreds of flagged pages and no explanation for any of them.
 if (DATA.assetChanges && DATA.assetChanges.length) {
-  alerts.push('<div class="alert warn"><h3>The site's code changed since the baseline (' +
-    DATA.assetChanges.length + ')</h3><ul>' +
+  alerts.push(alertBox('warn', "The site's code changed since the baseline",
+    DATA.assetChanges.length, '<ul>' +
     DATA.assetChanges.map(function (c) { return '<li class="mono">' + esc(c.text) + '</li>'; }).join('') +
     '</ul><p class="muted">An update like this can change how every page looks at once. ' +
     'That explains why many pages are flagged below. It is not a reason to skip them: ' +
-    'the thing worth finding is a page the update broke.</p></div>');
+    'the thing worth finding is a page the update broke.</p>'));
 }
 
 // The pages that changed far more than the rest.
 if (DATA.outliers && DATA.outliers.length) {
-  alerts.push('<div class="alert err"><h3>Changed much more than the rest (' + DATA.outliers.length + ')</h3>' +
+  alerts.push(alertBox('err', 'Changed much more than the rest', DATA.outliers.length,
     '<p class="muted">Most changed pages moved about ' + pct(DATA.typicalChange) +
     ' of their pixels. These moved far more, so if an update broke a layout, it is most likely here. Open these first.</p><ul>' +
     DATA.outliers.slice(0, 25).map(function (loc) {
@@ -381,29 +423,31 @@ if (DATA.outliers && DATA.outliers.length) {
         ');return false;" class="mono">' + esc(loc) + '</a></li>';
     }).join('') +
     (DATA.outliers.length > 25 ? '<li class="muted">... and ' + (DATA.outliers.length - 25) + ' more</li>' : '') +
-    '</ul></div>');
+    '</ul>'));
 }
 if (DATA.discoveryErrors.length) {
-  alerts.push('<div class="alert err"><h3>Discovery errors - inventory is incomplete</h3><ul>' +
-    DATA.discoveryErrors.map(function (e) { return '<li>' + esc(e) + '</li>'; }).join('') + '</ul></div>');
+  alerts.push(alertBox('err', 'Discovery errors - inventory is incomplete', DATA.discoveryErrors.length,
+    '<ul>' + DATA.discoveryErrors.map(function (e) { return '<li>' + esc(e) + '</li>'; }).join('') + '</ul>'));
 }
 if (DATA.missingFromSitemap.length) {
-  alerts.push('<div class="alert warn"><h3>Recovered from REST - published but absent from the sitemap</h3><ul>' +
+  alerts.push(alertBox('warn', 'Recovered from REST - published but absent from the sitemap',
+    DATA.missingFromSitemap.reduce(function (n, m) { return n + m.urls.length; }, 0), '<ul>' +
     DATA.missingFromSitemap.map(function (m) {
       return '<li><strong>' + esc(m.type) + '</strong>: sitemap ' + m.sitemapCount + ' vs REST ' + m.restCount +
         ' - ' + m.urls.length + ' URL(s) added to this run<ul>' +
         m.urls.slice(0, 10).map(function (u) { return '<li><a href="' + esc(u) + '" target="_blank">' + esc(u) + '</a></li>'; }).join('') +
         (m.urls.length > 10 ? '<li>... and ' + (m.urls.length - 10) + ' more</li>' : '') + '</ul></li>';
-    }).join('') + '</ul></div>');
+    }).join('') + '</ul>'));
 }
 if (DATA.possiblyMissed.length) {
-  alerts.push('<div class="alert warn"><h3>Possibly missed - post types with published items but no sitemap</h3><ul>' +
+  alerts.push(alertBox('warn', 'Possibly missed - post types with published items but no sitemap',
+    DATA.possiblyMissed.length, '<ul>' +
     DATA.possiblyMissed.map(function (m) {
       return '<li><strong>' + esc(m.type) + '</strong> - ' + m.restCount + ' published (needs a one-time human check)</li>';
-    }).join('') + '</ul></div>');
+    }).join('') + '</ul>'));
 }
 if (DATA.linkIssues.length) {
-  alerts.push('<div class="alert"><h3>Link issues (' + DATA.linkIssues.length + ')</h3><ul>' +
+  alerts.push(alertBox('', 'Link issues', DATA.linkIssues.length, '<ul>' +
     DATA.linkIssues.slice(0, 60).map(function (l) {
       var cls = (l.verdict === 'broken' || l.verdict === 'error') ? 'flag' : '';
       return '<li><span class="pill ' + cls + '">' + esc(l.verdict) + ' ' + (l.status || '') + '</span> ' +
@@ -411,7 +455,7 @@ if (DATA.linkIssues.length) {
         (l.finalUrl ? ' <span class="muted">-> ' + esc(l.finalUrl) + '</span>' : '') +
         ' <span class="muted">(' + l.referrers.length + ' page' + (l.referrers.length === 1 ? '' : 's') + ')</span>' +
         anchorLabel(l) + '</li>';
-    }).join('') + (DATA.linkIssues.length > 60 ? '<li>... see links.json for the rest</li>' : '') + '</ul></div>');
+    }).join('') + (DATA.linkIssues.length > 60 ? '<li>... see links.json for the rest</li>' : '') + '</ul>'));
 }
 if (DATA.copy) {
   var CATEGORY_LABELS = {
@@ -431,18 +475,30 @@ if (DATA.copy) {
     body += '<p class="muted">No copy issues found across ' + DATA.copy.blocksChecked +
       ' distinct text blocks (' + DATA.copy.wordsChecked.toLocaleString() + ' words).</p>';
   } else {
-    // Grouped by category, and within a category the sort from copy/run.ts is
-    // preserved: certain findings that appear on the most pages come first.
-    var groups = {};
-    DATA.copy.findings.slice(0, COPY_CAP).forEach(function (f) {
-      (groups[f.category] = groups[f.category] || []).push(f);
-    });
+    // Split by how sure the checker is, then grouped by category within each
+    // half. Within a category the sort from copy/run.ts is preserved.
+    //
+    // "December 7th is a Monday, not a Sunday" and "some style guides prefer a
+    // comma here" used to sit in one list. A reader who hits three preferences
+    // first decides the whole section is preferences and stops reading. The
+    // low-confidence group is still here in full, below the real defects.
+    var renderCopyGroup = function (heading, note, findings) {
+      if (!findings.length) return;
+      body += '<h3 style="margin:18px 0 4px;font-size:13px;text-transform:uppercase;' +
+        'letter-spacing:.05em;border-bottom:1px solid var(--line);padding-bottom:5px">' +
+        esc(heading) + ' (' + findings.length + ')</h3>';
+      if (note) body += '<p class="muted" style="margin:6px 0 0">' + esc(note) + '</p>';
 
-    Object.keys(CATEGORY_LABELS).forEach(function (cat) {
+      var groups = {};
+      findings.slice(0, COPY_CAP).forEach(function (f) {
+        (groups[f.category] = groups[f.category] || []).push(f);
+      });
+
+      Object.keys(CATEGORY_LABELS).forEach(function (cat) {
       var list = groups[cat];
       if (!list || !list.length) return;
       body += '<h4 style="margin:14px 0 6px">' + CATEGORY_LABELS[cat] +
-        ' (' + (DATA.copy.counts[cat] || list.length) + ')</h4><ul>';
+        ' (' + list.length + ')</h4><ul>';
 
       list.forEach(function (f) {
         var cls = f.confidence === 'high' ? 'flag' : '';
@@ -463,7 +519,19 @@ if (DATA.copy) {
       });
 
       body += '</ul>';
-    });
+      });
+    };
+
+    renderCopyGroup(
+      'Likely problems',
+      '',
+      DATA.copy.findings.filter(function (f) { return f.confidence !== 'low'; })
+    );
+    renderCopyGroup(
+      'Style suggestions - your call',
+      'Nothing here is wrong. These are house-style preferences, and a different reviewer would disagree with some of them.',
+      DATA.copy.findings.filter(function (f) { return f.confidence === 'low'; })
+    );
 
     if (DATA.copy.findings.length > COPY_CAP) {
       body += '<p class="muted">Showing the first ' + COPY_CAP + ' of ' +
@@ -475,10 +543,22 @@ if (DATA.copy) {
       (DATA.copy.dismissed ? ' (' + DATA.copy.dismissed + ' already hidden).' : '.') + '</p>';
   }
 
-  alerts.push('<div class="alert"><h3>Copy issues (' + DATA.copy.findings.length + ')</h3>' + body + '</div>');
+  alerts.push(alertBox('', 'Copy issues', DATA.copy.findings.length, body));
 }
 
 document.getElementById('alerts').innerHTML = alerts.join('');
+
+// Only shown when there is more than one section to act on.
+var alertTools = document.getElementById('alerttools');
+if (document.querySelectorAll('details.alert').length > 1) {
+  alertTools.hidden = false;
+  alertTools.querySelectorAll('button').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var open = b.dataset.all === '1';
+      document.querySelectorAll('details.alert').forEach(function (d) { d.open = open; });
+    });
+  });
+}
 
 var typeSel = document.getElementById('type');
 var types = DATA.rows.map(function (r) { return r.type; }).filter(function (v, i, a) { return a.indexOf(v) === i; }).sort();
