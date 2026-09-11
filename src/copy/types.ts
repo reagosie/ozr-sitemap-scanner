@@ -1,4 +1,10 @@
-export type CopyCategory = 'spelling' | 'grammar' | 'mechanical' | 'consistency' | 'date';
+export type CopyCategory =
+  | 'placeholder'
+  | 'spelling'
+  | 'grammar'
+  | 'mechanical'
+  | 'consistency'
+  | 'date';
 
 /**
  * How sure the checker is, which drives sort order in the report.

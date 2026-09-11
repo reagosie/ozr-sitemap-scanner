@@ -1,5 +1,6 @@
-import { buildCorpus, type PageText } from './extract.js';
+import { buildCorpus, type Corpus, type PageText } from './extract.js';
 import { checkMechanical } from './mechanical.js';
+import { checkPlaceholder } from './placeholder.js';
 import { checkSpelling, loadSpeller } from './spelling.js';
 import { checkConsistency } from './consistency.js';
 import { checkDates } from './dates.js';
@@ -21,6 +22,7 @@ export interface ProofreadOptions {
 const CONFIDENCE_RANK: Record<Confidence, number> = { high: 0, medium: 1, low: 2 };
 
 const EMPTY_COUNTS: Record<CopyCategory, number> = {
+  placeholder: 0,
   spelling: 0,
   grammar: 0,
   mechanical: 0,
@@ -60,17 +62,38 @@ export async function proofread(pages: PageText[], opts: ProofreadOptions): Prom
 
   const findings: CopyFinding[] = [];
 
+  // Placeholder text is found FIRST, and its blocks are then withheld from
+  // every other check.
+  //
+  // campozark.com/safety/leadership-staff/ carries a live paragraph of Lorem
+  // Ipsum. Checked as prose it produced twenty-six "ipsum is not a known word"
+  // rows -- 45% of that site's whole spelling section -- plus grammar
+  // complaints about the Latin. One finding naming the page is worth more than
+  // all of it, and there is nothing useful to say about filler's grammar.
+  reporter.log('    placeholder text');
+  const placeholder = checkPlaceholder(corpus);
+  findings.push(...placeholder.findings);
+
+  const prose: Corpus = placeholder.placeholderHashes.size
+    ? { ...corpus, blocks: corpus.blocks.filter((b) => !placeholder.placeholderHashes.has(b.hash)) }
+    : corpus;
+  if (placeholder.placeholderHashes.size) {
+    reporter.log(
+      `      ${placeholder.placeholderHashes.size} block(s) of filler withheld from the other checks`,
+    );
+  }
+
   // One dictionary load, shared: spelling needs it to find errors and
   // consistency needs it to tell a brand name from an ordinary word.
   const spell = await loadSpeller();
 
   reporter.log('    mechanical');
-  findings.push(...(await checkMechanical(corpus)));
+  findings.push(...(await checkMechanical(prose)));
 
   reporter.log('    spelling');
   findings.push(
     ...(await checkSpelling(
-      corpus,
+      prose,
       { siteWordMinPages: opts.siteWordMinPages, glossary: opts.glossary },
       spell,
     )),
@@ -78,7 +101,7 @@ export async function proofread(pages: PageText[], opts: ProofreadOptions): Prom
 
   reporter.log('    consistency');
   findings.push(
-    ...checkConsistency(corpus, {
+    ...checkConsistency(prose, {
       canonicalNames: opts.canonicalNames,
       minPages: opts.siteWordMinPages,
       isDictionaryWord: (w) => spell.correct(w),
@@ -86,11 +109,11 @@ export async function proofread(pages: PageText[], opts: ProofreadOptions): Prom
   );
 
   reporter.log('    dates');
-  findings.push(...checkDates(corpus));
+  findings.push(...checkDates(prose));
 
   if (opts.languageTool) {
     reporter.log('    grammar (LanguageTool)');
-    const grammar = await checkGrammar(corpus, {
+    const grammar = await checkGrammar(prose, {
       port: opts.languageToolPort,
       autoStart: true,
       reporter,

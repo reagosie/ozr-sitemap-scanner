@@ -459,7 +459,8 @@ if (DATA.linkIssues.length) {
 }
 if (DATA.copy) {
   var CATEGORY_LABELS = {
-    spelling: 'Spelling', grammar: 'Grammar', mechanical: 'Mechanical',
+    placeholder: 'Unfinished placeholder text',
+  spelling: 'Spelling', grammar: 'Grammar', mechanical: 'Mechanical',
     consistency: 'Naming consistency', date: 'Possibly out of date'
   };
   var COPY_CAP = 150;

@@ -295,6 +295,7 @@ function buildFindings(input: ReportInput): Findings {
 }
 
 const CATEGORY_LABELS: Record<string, string> = {
+  placeholder: 'Unfinished placeholder text',
   spelling: 'Spelling',
   grammar: 'Grammar',
   mechanical: 'Mechanical',

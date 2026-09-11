@@ -228,6 +228,9 @@ async function runProofread(
     `  copy: ${copy.findings.length} finding(s) - ` +
       `${c.spelling} spelling, ${c.grammar} grammar, ${c.mechanical} mechanical, ` +
       `${c.consistency} consistency, ${c.date} date` +
+      // Called out separately rather than folded into the list: unfinished
+      // filler published on a live page is the loudest thing this check finds.
+      (c.placeholder ? `, ${c.placeholder} UNFINISHED PLACEHOLDER TEXT` : '') +
       (copy.dismissed ? `  (${copy.dismissed} previously dismissed)` : ''),
   );
   for (const s of copy.skipped) log(`    ${s.check} skipped: ${s.reason}`);
