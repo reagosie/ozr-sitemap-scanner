@@ -190,7 +190,30 @@ async function runProofread(
   const accepted =
     (await backends.data.getJson<{ ids: string[] }>(acceptedKey(origin)))?.ids ?? [];
 
-  const copy = await proofread(captures, {
+  // A page that failed to load has text too -- the error page's text.
+  //
+  // campwareagle lost 52 pages to HTTP 504 while six scans ran at once, and
+  // Cloudflare's "error 504" page was proofread in their place. Its Ray ID is a
+  // random string of hex, so the spellchecker pulled letter-runs out of it and
+  // reported "aef", "aedd", "cfe", "ebd", "cff", "aec" and "aedeabc" as
+  // misspellings -- eight of the site's twenty-five, all pure noise, and all
+  // standing in for pages whose real copy was never read.
+  //
+  // Capture no longer stores that text at all. This filter is what repairs a
+  // run captured BEFORE that change, so `npm run proofread` fixes an existing
+  // baseline without photographing the site again.
+  //
+  // The test is the WIDEST breakpoint specifically, because that is the only
+  // one whose text is kept -- a page can succeed at mobile and still have
+  // nothing but an error page recorded as its copy.
+  const widest = config.breakpoints.reduce((a, b) => (b.width > a.width ? b : a));
+  const loaded = captures.filter((c) => c.breakpoints[widest.name]?.ok !== false);
+  const notLoaded = captures.length - loaded.length;
+  if (notLoaded > 0) {
+    log(`    skipping ${notLoaded} page(s) that failed to load -- their text is an error page`);
+  }
+
+  const copy = await proofread(loaded, {
     siteWordMinPages: config.proofread.siteWordMinPages,
     glossary: [...config.proofread.glossary, ...(sc.glossary ?? [])],
     canonicalNames: sc.canonicalNames ?? [],

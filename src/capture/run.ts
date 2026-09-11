@@ -98,6 +98,39 @@ export function orderForCapture(entries: UrlEntry[]): UrlEntry[] {
     .sort((a, b) => a.tier.localeCompare(b.tier) || lastmodRank(b.lastmod) - lastmodRank(a.lastmod));
 }
 
+/**
+ * How many times a page is attempted before the run gives up on it.
+ *
+ * A page that fails leaves a HOLE in the baseline: nothing to compare against
+ * next time, so the next run reports it as new rather than checking whether it
+ * still renders. That is the one outcome this tool exists to prevent, which is
+ * why a transient failure is worth waiting out.
+ */
+const CAPTURE_ATTEMPTS = 3;
+
+/** Long pauses on purpose: a 504 means the server is struggling. */
+const CAPTURE_RETRY_MS = [4_000, 15_000];
+
+/**
+ * Should this failure be tried again?
+ *
+ * A 5xx is the server saying "not right now", not "this page does not exist".
+ * campwareagle's baseline lost 52 of its 330 pages to HTTP 504 while six scans
+ * ran at once -- and the SAME pages succeeded at another breakpoint minutes
+ * later, which is the proof that they were fine and the server was just busy.
+ *
+ * Not retried: 404 and 410, which are settled answers, and anything already
+ * marked `blocked` (403/429 from bot protection), where hammering again is the
+ * exact wrong response.
+ */
+export function worthRetrying(result: { ok: boolean; blocked: boolean; status: number; error?: string }): boolean {
+  if (result.ok || result.blocked) return false;
+  if (result.status >= 500) return true;
+  // status 0 means the navigation never produced a response: a socket reset, an
+  // aborted request, or Playwright's own timeout.
+  return result.status === 0;
+}
+
 export async function captureAll(
   inv: Inventory,
   backend: StorageBackend,
@@ -175,12 +208,27 @@ export async function captureAll(
             if (!cap) return;
 
             const wantText = extractText && bp.name === textBreakpoint.name;
-            const result = await capturePage(ctx, entry.loc, {
+
+            let result = await capturePage(ctx, entry.loc, {
               mask,
               hide,
               extractText: wantText,
               textIgnoreSelector: textIgnoreSelectors.join(','),
             });
+            for (let attempt = 1; attempt < CAPTURE_ATTEMPTS && worthRetrying(result); attempt++) {
+              const wait = CAPTURE_RETRY_MS[attempt - 1] ?? 15_000;
+              reporter.log(
+                `    retrying ${entry.loc} in ${wait / 1000}s ` +
+                  `(${result.error ?? `HTTP ${result.status}`}, attempt ${attempt + 1}/${CAPTURE_ATTEMPTS})`,
+              );
+              await new Promise((done) => setTimeout(done, wait));
+              result = await capturePage(ctx, entry.loc, {
+                mask,
+                hide,
+                extractText: wantText,
+                textIgnoreSelector: textIgnoreSelectors.join(','),
+              });
+            }
 
             const file = `${cap.slug}__${bp.name}.png`;
             let sha256: string | undefined;
@@ -209,7 +257,12 @@ export async function captureAll(
               ...(result.error ? { error: result.error } : {}),
             };
 
-            if (wantText && result.textBlocks.length) cap.textBlocks = result.textBlocks;
+            // Only from a page that actually loaded. A failed capture still has
+            // text -- the error page's text -- and storing it means the
+            // proofreader reads Cloudflare's "error 504" page instead of the
+            // site. Its Ray ID is random hex, which the spellchecker then
+            // reports as misspellings: "aef", "aedd", "cfe", "ebd", "cbd".
+            if (wantText && result.ok && result.textBlocks.length) cap.textBlocks = result.textBlocks;
             mergeAssetVersions(assetVersions, result.assetVersions);
 
             const set = linkUnion.get(entry.loc) ?? new Set<string>();
